@@ -5,600 +5,299 @@ import datetime
 from flask import Flask, request
 from openai import OpenAI
 
-# =========================
-#  CONFIGURACIÓN BÁSICA
-# =========================
+# =====================================================
+#  CONFIGURACIÓN GENERAL
+# =====================================================
 
 app = Flask(__name__)
 
+# Tokens / claves
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 NOTION_TOKEN = os.getenv("NOTION_TOKEN")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
+# Bases de datos reales
 NOTION_DB_FINANZAS = os.getenv("NOTION_DB_FINANZAS")
 NOTION_DB_TAREAS = os.getenv("NOTION_DB_TAREAS")
 NOTION_DB_EVENTOS = os.getenv("NOTION_DB_EVENTOS")
 NOTION_DB_PROYECTOS = os.getenv("NOTION_DB_PROYECTOS")
 
+# URLs
 TELEGRAM_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
 NOTION_BASE_URL = "https://api.notion.com/v1"
-NOTION_VERSION = "2022-06-28"
 
-client = OpenAI()  # Usa OPENAI_API_KEY del entorno
+# Cliente de OpenAI
+client = OpenAI(api_key=OPENAI_API_KEY)
 
-
+# Encabezados Notion
 NOTION_HEADERS = {
     "Authorization": f"Bearer {NOTION_TOKEN}",
     "Content-Type": "application/json",
-    "Notion-Version": NOTION_VERSION,
+    "Notion-Version": "2022-06-28"
 }
 
+# =====================================================
+#  FUNCIONES GENERALES
+# =====================================================
 
-# =========================
-#  UTILIDADES GENERALES
-# =========================
-
-def send_message(chat_id, text, reply_to=None):
-    """Envia mensaje de texto a Telegram."""
-    payload = {
-        "chat_id": chat_id,
-        "text": text,
-        "parse_mode": "Markdown",
-    }
-    if reply_to:
-        payload["reply_to_message_id"] = reply_to
-
+def send_message(chat_id, text):
+    """Enviar mensaje a Telegram."""
     try:
-        requests.post(TELEGRAM_URL, json=payload, timeout=15)
+        requests.post(
+            TELEGRAM_URL,
+            json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
+        )
     except Exception as e:
         print("Error enviando mensaje a Telegram:", e)
-
-
-def notion_create_page(database_id, properties):
-    """Crea una página en una base de datos de Notion."""
-    data = {
-        "parent": {"database_id": database_id},
-        "properties": properties,
-    }
-    try:
-        r = requests.post(
-            f"{NOTION_BASE_URL}/pages", headers=NOTION_HEADERS, json=data, timeout=20
-        )
-        if r.status_code >= 300:
-            print("Error creando página en Notion:", r.status_code, r.text)
-        return r
-    except Exception as e:
-        print("Error de red con Notion:", e)
-        return None
-
-
-def notion_query(database_id, body):
-    """Consulta una base de datos de Notion."""
-    try:
-        r = requests.post(
-            f"{NOTION_BASE_URL}/databases/{database_id}/query",
-            headers=NOTION_HEADERS,
-            json=body,
-            timeout=25,
-        )
-        if r.status_code >= 300:
-            print("Error consultando Notion:", r.status_code, r.text)
-            return {}
-        return r.json()
-    except Exception as e:
-        print("Error de red consultando Notion:", e)
-        return {}
 
 
 def hoy_iso():
     return datetime.date.today().isoformat()
 
 
-def inicio_fin_mes_actual():
+def inicio_fin_mes():
     hoy = datetime.date.today()
     inicio = hoy.replace(day=1)
     if hoy.month == 12:
-        fin = hoy.replace(year=hoy.year + 1, month=1, day=1) - datetime.timedelta(days=1)
+        fin = hoy.replace(year=hoy.year + 1, month=1, day=1)
     else:
-        fin = hoy.replace(month=hoy.month + 1, day=1) - datetime.timedelta(days=1)
+        fin = hoy.replace(month=hoy.month + 1, day=1)
     return inicio.isoformat(), fin.isoformat()
 
+# =====================================================
+#  NOTION – CREAR REGISTROS
+# =====================================================
 
-# =========================
-#  CREACIÓN DE REGISTROS
-# =========================
+def notion_create_page(db_id, props):
+    """Crear página en Notion."""
+    try:
+        r = requests.post(
+            f"{NOTION_BASE_URL}/pages",
+            headers=NOTION_HEADERS,
+            json={"parent": {"database_id": db_id}, "properties": props}
+        )
+        if r.status_code >= 300:
+            print("ERROR creando en Notion:", r.text)
+        return r
+    except Exception as e:
+        print("Error Notion:", e)
 
-def create_financial_record(movimiento, tipo, monto, categoria="General",
-                            area="Finanzas personales", fecha=None):
-    """Crea movimiento en FINANZAS Ares1409."""
-    if fecha is None:
-        fecha = hoy_iso()
 
-    properties = {
-        "Movimiento": {"title": [{"text": {"content": movimiento}}]},
+def create_finanza(desc, tipo, monto):
+    props = {
+        "Movimiento": {"title": [{"text": {"content": desc}}]},
         "Tipo": {"select": {"name": tipo}},
         "Monto": {"number": float(monto)},
-        "Categoría": {"select": {"name": categoria}},
-        "Área": {"select": {"name": area}},
-        "Fecha": {"date": {"start": fecha}},
+        "Categoría": {"select": {"name": "General"}},
+        "Área": {"select": {"name": "Finanzas personales"}},
+        "Fecha": {"date": {"start": hoy_iso()}}
     }
-    notion_create_page(NOTION_DB_FINANZAS, properties)
+    notion_create_page(NOTION_DB_FINANZAS, props)
 
 
-def create_task(nombre, fecha=None, area="General", estado="Pendiente",
-                prioridad="Media", contexto="General", notas=""):
-    """Crea tarea en TAREAS Ares1409."""
-    if fecha is None:
-        fecha = hoy_iso()
-
-    properties = {
-        "Tarea": {"title": [{"text": {"content": nombre}}]},
-        "Estado": {"select": {"name": estado}},
-        "Área": {"select": {"name": area}},
-        "Fecha": {"date": {"start": fecha}},
-        "Prioridad": {"select": {"name": prioridad}},
-        "Contexto": {"select": {"name": contexto}},
+def create_tarea(desc):
+    props = {
+        "Tarea": {"title": [{"text": {"content": desc}}]},
+        "Estado": {"select": {"name": "Pendiente"}},
+        "Área": {"select": {"name": "General"}},
+        "Fecha": {"date": {"start": hoy_iso()}},
     }
-    if notas:
-        properties["Notas"] = {
-            "rich_text": [{"text": {"content": notas[:1800]}}],
-        }
-
-    notion_create_page(NOTION_DB_TAREAS, properties)
+    notion_create_page(NOTION_DB_TAREAS, props)
 
 
-def create_event(nombre, fecha, area="General", tipo_evento="General",
-                 lugar="", notas=""):
-    """Crea evento en EVENTOS Ares1409."""
-    properties = {
-        "Evento": {"title": [{"text": {"content": nombre}}]},
-        "Fecha": {"date": {"start": fecha}},
-        "Área": {"select": {"name": area}},
-        "Tipo de Evento": {"select": {"name": tipo_evento}},
+def create_evento(desc):
+    props = {
+        "Evento": {"title": [{"text": {"content": desc}}]},
+        "Fecha": {"date": {"start": hoy_iso()}},
+        "Área": {"select": {"name": "General"}},
+        "Tipo de Evento": {"select": {"name": "General"}},
     }
-    if lugar:
-        properties["Lugar"] = {"rich_text": [{"text": {"content": lugar[:500]}}]}
-    if notas:
-        properties["Notas"] = {"rich_text": [{"text": {"content": notas[:1800]}}]}
-
-    notion_create_page(NOTION_DB_EVENTOS, properties)
+    notion_create_page(NOTION_DB_EVENTOS, props)
 
 
-def create_project(nombre, area="General", estado="Activo",
-                   fecha_inicio=None, fecha_fin=None,
-                   impacto="Medio", notas=""):
-    """Crea proyecto en PROYECTOS Ares1409."""
-    if fecha_inicio is None:
-        fecha_inicio = hoy_iso()
-
-    properties = {
+def create_proyecto(nombre):
+    props = {
         "Proyecto": {"title": [{"text": {"content": nombre}}]},
-        "Área": {"select": {"name": area}},
-        "Estado": {"select": {"name": estado}},
-        "Fecha Inicio": {"date": {"start": fecha_inicio}},
-        "Impacto": {"select": {"name": impacto}},
+        "Área": {"select": {"name": "General"}},
+        "Estado": {"select": {"name": "Activo"}},
+        "Fecha Inicio": {"date": {"start": hoy_iso()}},
+        "Impacto": {"select": {"name": "Medio"}},
     }
-    if fecha_fin:
-        properties["Fecha objetivo fin"] = {"date": {"start": fecha_fin}}
-    if notas:
-        properties["Notas"] = {"rich_text": [{"text": {"content": notas[:1800]}}]}
+    notion_create_page(NOTION_DB_PROYECTOS, props)
 
-    notion_create_page(NOTION_DB_PROYECTOS, properties)
+# =====================================================
+#  NOTION – CONSULTAS
+# =====================================================
 
+def resumen_finanzas():
+    inicio, fin = inicio_fin_mes()
 
-# =========================
-#  CONSULTAS E INFORMES
-# =========================
-
-def resumen_finanzas_mes():
-    """Devuelve texto con resumen básico de gastos/ingresos del mes actual."""
-    inicio, fin = inicio_fin_mes_actual()
-
-    body = {
+    query = {
         "filter": {
             "and": [
-                {
-                    "property": "Fecha",
-                    "date": {
-                        "on_or_after": inicio,
-                    },
-                },
-                {
-                    "property": "Fecha",
-                    "date": {
-                        "on_or_before": fin,
-                    },
-                },
+                {"property": "Fecha", "date": {"on_or_after": inicio}},
+                {"property": "Fecha", "date": {"before": fin}}
             ]
-        },
-        "page_size": 100,
+        }
     }
-    data = notion_query(NOTION_DB_FINANZAS, body)
-    resultados = data.get("results", [])
 
-    total_ingresos = 0.0
-    total_gastos = 0.0
+    try:
+        r = requests.post(
+            f"{NOTION_BASE_URL}/databases/{NOTION_DB_FINANZAS}/query",
+            headers=NOTION_HEADERS,
+            json=query
+        )
+        data = r.json()
+    except Exception as e:
+        print("Error resumen finanzas:", e)
+        return "Error consultando finanzas."
 
-    for page in resultados:
-        props = page.get("properties", {})
-        tipo_prop = props.get("Tipo", {})
-        tipo = (
-            tipo_prop.get("select", {}) or {}
-        ).get("name", "")
+    ingresos = 0
+    gastos = 0
 
-        monto = props.get("Monto", {}).get("number", 0) or 0
+    for row in data.get("results", []):
+        props = row["properties"]
+        tipo = props["Tipo"]["select"]["name"]
+        monto = props["Monto"]["number"]
 
         if tipo == "Ingreso":
-            total_ingresos += monto
+            ingresos += monto
         elif tipo == "Egreso":
-            total_gastos += monto
+            gastos += monto
 
-    balance = total_ingresos - total_gastos
+    balance = ingresos - gastos
 
-    texto = (
-        f"*Resumen financiero del mes actual*\n\n"
-        f"• Ingresos: `{total_ingresos:,.2f}`\n"
-        f"• Gastos: `{total_gastos:,.2f}`\n"
-        f"• Balance: `{balance:,.2f}`\n"
+    return (
+        f"*Resumen financiero del mes:*\n\n"
+        f"• Ingresos: `{ingresos:,.2f}`\n"
+        f"• Gastos: `{gastos:,.2f}`\n"
+        f"• Balance: `{balance:,.2f}`"
     )
-    return texto
 
+# =====================================================
+#  OPENAI – GPT-4.1-mini
+# =====================================================
 
-def listar_tareas_hoy():
-    hoy = hoy_iso()
-    body = {
-        "filter": {
-            "and": [
-                {"property": "Fecha", "date": {"on_or_before": hoy}},
-                {"property": "Estado", "select": {"does_not_equal": "Completada"}},
-            ]
-        },
-        "sorts": [{"property": "Fecha", "direction": "ascending"}],
-        "page_size": 50,
-    }
-    data = notion_query(NOTION_DB_TAREAS, body)
-    resultados = data.get("results", [])
-
-    if not resultados:
-        return "No tienes tareas pendientes para hoy. 😌"
-
-    lineas = ["*Tareas para hoy / atrasadas:*"]
-    for page in resultados:
-        props = page.get("properties", {})
-        titulo = props.get("Tarea", {}).get("title", [])
-        nombre = titulo[0]["plain_text"] if titulo else "Tarea sin nombre"
-
-        fecha = props.get("Fecha", {}).get("date", {}) or {}
-        fecha_txt = fecha.get("start", "sin fecha")
-
-        estado = (props.get("Estado", {}).get("select", {}) or {}).get("name", "")
-        prioridad = (props.get("Prioridad", {}).get("select", {}) or {}).get("name", "")
-
-        lineas.append(f"• *{nombre}* — `{fecha_txt}` — {estado} ({prioridad})")
-
-    return "\n".join(lineas)
-
-
-def listar_eventos_hoy_y_proximos(dias=3):
-    hoy = datetime.date.today()
-    fin = hoy + datetime.timedelta(days=dias)
-    body = {
-        "filter": {
-            "and": [
-                {"property": "Fecha", "date": {"on_or_after": hoy.isoformat()}},
-                {"property": "Fecha", "date": {"on_or_before": fin.isoformat()}},
-            ]
-        },
-        "sorts": [{"property": "Fecha", "direction": "ascending"}],
-        "page_size": 50,
-    }
-    data = notion_query(NOTION_DB_EVENTOS, body)
-    resultados = data.get("results", [])
-
-    if not resultados:
-        return f"No tienes eventos hoy ni en los próximos {dias} días. 🙂"
-
-    lineas = [f"*Eventos hoy y próximos {dias} días:*"]
-    for page in resultados:
-        props = page.get("properties", {})
-        titulo = props.get("Evento", {}).get("title", [])
-        nombre = titulo[0]["plain_text"] if titulo else "Evento sin nombre"
-
-        fecha = props.get("Fecha", {}).get("date", {}) or {}
-        fecha_txt = fecha.get("start", "sin fecha")
-
-        lugar_rich = props.get("Lugar", {}).get("rich_text", [])
-        lugar = lugar_rich[0]["plain_text"] if lugar_rich else ""
-
-        lineas.append(f"• *{nombre}* — `{fecha_txt}`" + (f" — {lugar}" if lugar else ""))
-
-    return "\n".join(lineas)
-
-
-def listar_proyectos_activos(limit=10):
-    body = {
-        "filter": {"property": "Estado", "select": {"equals": "Activo"}},
-        "sorts": [{"property": "Impacto", "direction": "descending"}],
-        "page_size": limit,
-    }
-    data = notion_query(NOTION_DB_PROYECTOS, body)
-    resultados = data.get("results", [])
-
-    lineas = []
-    for page in resultados:
-        props = page.get("properties", {})
-        titulo = props.get("Proyecto", {}).get("title", [])
-        nombre = titulo[0]["plain_text"] if titulo else "Proyecto sin nombre"
-
-        area = (props.get("Área", {}).get("select", {}) or {}).get("name", "")
-        impacto = (props.get("Impacto", {}).get("select", {}) or {}).get("name", "")
-        lineas.append(f"- {nombre} ({area}, impacto {impacto})")
-
-    return "\n".join(lineas)
-
-
-def snapshot_contexto():
-    """Prepara un pequeño resumen de Notion para darle contexto a la IA."""
-    try:
-        resumen_fin = resumen_finanzas_mes()
-    except Exception:
-        resumen_fin = "No se pudo obtener el resumen financiero."
-
-    tareas = listar_tareas_hoy()
-    eventos = listar_eventos_hoy_y_proximos(3)
-    proyectos = listar_proyectos_activos(10)
-
-    contexto = (
-        "=== RESUMEN AUTOMÁTICO ARES1409 ===\n\n"
-        f"{resumen_fin}\n\n"
-        f"{tareas}\n\n"
-        f"{eventos}\n\n"
-        "*Proyectos activos:*\n"
-        f"{proyectos}\n"
-        "=== FIN DEL RESUMEN ==="
-    )
-    return contexto
-
-
-# =========================
-#  IA (OPENAI)
-# =========================
-
-def consultar_ia(mensaje_usuario):
-    """Llama al modelo gpt-5.1-mini para actuar como asistente personal."""
-    contexto = snapshot_contexto()
+def consultar_ia(texto_usuario: str) -> str:
+    """Consulta la IA usando el modelo correcto GPT-4.1-mini."""
 
     prompt = (
-        "Eres Ares1409, un asistente personal que ayuda a organizar finanzas, "
-        "tareas, eventos y proyectos. El usuario es hispanohablante. "
-        "Responde SIEMPRE en español, de forma clara, directa y práctica.\n\n"
-        f"A continuación tienes información reciente del sistema (Notion):\n\n"
-        f"{contexto}\n\n"
-        "Ahora responde a la pregunta o instrucción del usuario.\n"
-        "Si te pide que planifiques el día o la semana, usa las tareas y eventos "
-        "del resumen. Si te pide análisis financiero, usa el resumen financiero.\n\n"
-        f"Mensaje del usuario: {mensaje_usuario}\n\n"
-        "Respuesta:"
+        "Eres Ares1409, un asistente personal experto en finanzas, tareas, proyectos y eventos. "
+        "Responde SIEMPRE en español, de forma clara y directa.\n\n"
+        f"Usuario: {texto_usuario}\n\n"
+        "Responde:"
     )
 
     try:
-        completion = client.responses.create(
-            model="gpt-5.1-mini",
+        respuesta = client.responses.create(
+            model="gpt-4.1-mini",
             input=prompt,
+            max_output_tokens=200
         )
-        return completion.output_text
+        return respuesta.output[0].content[0].text
     except Exception as e:
-        print("Error llamando a OpenAI:", e)
+        print("Error al consultar OpenAI:", e)
         return (
             "No pude consultar la IA en este momento. "
             "Revisa tu cuota de OpenAI o vuelve a intentarlo más tarde."
         )
 
+# =====================================================
+#  PARSEO COMANDOS
+# =====================================================
 
-# =========================
-#  PARSEO DE COMANDOS
-# =========================
-
-HELP_TEXT = (
-    "*Ares1409 – Comandos rápidos*\n\n"
+AYUDA = (
+    "*Ares1409 – Comandos:*\n\n"
     "• `gasto: 150 tacos`\n"
     "• `ingreso: 9000 sueldo`\n"
-    "• `tarea: llamar a proveedor mañana`\n"
-    "• `evento: junta kaizen viernes 16:00`\n"
-    "• `proyecto: LoopMX segunda mano`\n\n"
-    "*Consultas rápidas*\n"
-    "• `gastos este mes`\n"
-    "• `ingresos este mes`\n"
-    "• `balance este mes`\n"
-    "• `tareas hoy`\n"
-    "• `eventos hoy`\n"
     "• `estado finanzas`\n"
-    "• `planifica mi día`\n"
-    "• `organiza mi semana`\n\n"
-    "Si escribes algo más libre, Ares1409 usará la IA para ayudarte."
+    "• `tarea: enviar reporte`\n"
+    "• `evento: junta mañana`\n"
+    "• `proyecto: LoopMX`\n\n"
+    "Si escribes algo libre, te respondo con IA."
 )
 
-
-def manejar_comando_finanzas(texto, chat_id):
-    # gasto: 150 tacos
-    if texto.startswith("gasto:"):
-        contenido = texto.replace("gasto:", "", 1).strip()
-        partes = contenido.split(" ", 1)
-        if not partes:
-            send_message(chat_id, "Formato: `gasto: 150 tacos`")
-            return True
-
-        monto = partes[0].replace(",", "")
-        descripcion = partes[1] if len(partes) > 1 else "Sin descripción"
-
-        try:
-            monto_num = float(monto)
-        except ValueError:
-            send_message(chat_id, "No entendí el monto. Usa algo como: `gasto: 150 tacos`")
-            return True
-
-        create_financial_record(
-            movimiento=descripcion,
-            tipo="Egreso",
-            monto=monto_num,
-        )
-        send_message(chat_id, f"✔ Gasto registrado: {monto_num} – {descripcion}")
-        return True
-
-    # ingreso: 9000 sueldo
-    if texto.startswith("ingreso:"):
-        contenido = texto.replace("ingreso:", "", 1).strip()
-        partes = contenido.split(" ", 1)
-        if not partes:
-            send_message(chat_id, "Formato: `ingreso: 9000 sueldo`")
-            return True
-
-        monto = partes[0].replace(",", "")
-        descripcion = partes[1] if len(partes) > 1 else "Sin descripción"
-
-        try:
-            monto_num = float(monto)
-        except ValueError:
-            send_message(chat_id, "No entendí el monto. Usa algo como: `ingreso: 9000 sueldo`")
-            return True
-
-        create_financial_record(
-            movimiento=descripcion,
-            tipo="Ingreso",
-            monto=monto_num,
-        )
-        send_message(chat_id, f"✔ Ingreso registrado: {monto_num} – {descripcion}")
-        return True
-
-    # Resumen financiero
-    if "gastos este mes" in texto or "gasto este mes" in texto:
-        send_message(chat_id, resumen_finanzas_mes())
-        return True
-
-    if "ingresos este mes" in texto:
-        # usando el mismo resumen para no duplicar lógica
-        send_message(chat_id, resumen_finanzas_mes())
-        return True
-
-    if "balance este mes" in texto or "estado finanzas" in texto:
-        send_message(chat_id, resumen_finanzas_mes())
-        return True
-
-    return False
-
-
-def manejar_comando_tareas(texto, chat_id):
-    # tarea: comprar madera mañana 6pm
-    if texto.startswith("tarea:"):
-        descripcion = texto.replace("tarea:", "", 1).strip()
-        if not descripcion:
-            send_message(chat_id, "Formato: `tarea: descripción de la tarea`")
-            return True
-
-        create_task(descripcion)
-        send_message(chat_id, f"✔ Tarea creada: {descripcion}")
-        return True
-
-    if "tareas hoy" in texto or "tareas atrasadas" in texto:
-        send_message(chat_id, listar_tareas_hoy())
-        return True
-
-    return False
-
-
-def manejar_comando_eventos(texto, chat_id):
-    # evento: junta kaizen viernes 16:00
-    if texto.startswith("evento:"):
-        descripcion = texto.replace("evento:", "", 1).strip()
-        if not descripcion:
-            send_message(chat_id, "Formato rápido: `evento: junta kaizen viernes 16:00`")
-            return True
-
-        # Por simplicidad registramos evento para hoy
-        create_event(descripcion, fecha=hoy_iso())
-        send_message(chat_id, f"✔ Evento creado (hoy): {descripcion}")
-        return True
-
-    if "eventos hoy" in texto or "agenda" in texto:
-        send_message(chat_id, listar_eventos_hoy_y_proximos(3))
-        return True
-
-    return False
-
-
-def manejar_comando_proyectos(texto, chat_id):
-    # proyecto: LoopMX segunda mano
-    if texto.startswith("proyecto:"):
-        nombre = texto.replace("proyecto:", "", 1).strip()
-        if not nombre:
-            send_message(chat_id, "Formato: `proyecto: nombre del proyecto`")
-            return True
-
-        create_project(nombre)
-        send_message(chat_id, f"✔ Proyecto creado: {nombre}")
-        return True
-
-    if "proyectos activos" in texto:
-        listado = listar_proyectos_activos(20)
-        if not listado:
-            send_message(chat_id, "No tienes proyectos activos.")
-        else:
-            send_message(chat_id, "*Proyectos activos:*\n" + listado)
-        return True
-
-    return False
-
-
-# =========================
-#  WEBHOOK TELEGRAM
-# =========================
-
-@app.route("/", methods=["GET"])
-def home():
-    return "Ares1409 webhook OK", 200
-
+# =====================================================
+#  WEBHOOK
+# =====================================================
 
 @app.route("/", methods=["POST"])
 def webhook():
     data = request.get_json(force=True, silent=True) or {}
-    print("Update:", json.dumps(data, ensure_ascii=False))
+    msg = data.get("message") or {}
+    chat_id = msg.get("chat", {}).get("id")
+    texto = (msg.get("text") or "").strip()
+    lower = texto.lower()
 
-    message = data.get("message") or data.get("edited_message")
-    if not message:
+    if not texto:
         return "OK"
 
-    chat_id = message["chat"]["id"]
-    message_id = message.get("message_id")
-    text = (message.get("text") or "").strip()
-
-    if not text:
-        send_message(chat_id, "Solo entiendo mensajes de texto por ahora. 🙂")
+    # ---- SALUDO (NO usa IA) ----
+    if lower in ["hola", "hola!", "buenas", "buenos días", "buenos dias", "hey"]:
+        send_message(chat_id, "Hola 👋 Soy Ares1409. ¿En qué te ayudo hoy?\n\nEscribe `ayuda` para ver mis comandos.")
         return "OK"
 
-    lower = text.lower().strip()
-
-    # Comandos básicos
-    if lower in ("/start", "ayuda", "/help", "help"):
-        send_message(chat_id, HELP_TEXT)
+    if lower in ["ayuda", "/start", "/help"]:
+        send_message(chat_id, AYUDA)
         return "OK"
 
-    # Manejo de comandos específicos
-    manejado = (
-        manejar_comando_finanzas(lower, chat_id)
-        or manejar_comando_tareas(lower, chat_id)
-        or manejar_comando_eventos(lower, chat_id)
-        or manejar_comando_proyectos(lower, chat_id)
-    )
-
-    if manejado:
+    # ---- GASTO ----
+    if lower.startswith("gasto:"):
+        _, resto = texto.split(":", 1)
+        partes = resto.strip().split(" ", 1)
+        monto = float(partes[0])
+        desc = partes[1] if len(partes) > 1 else "Sin descripción"
+        create_finanza(desc, "Egreso", monto)
+        send_message(chat_id, f"✔ Gasto registrado: {monto} – {desc}")
         return "OK"
 
-    # Si no se reconoció, pasamos a la IA
-    respuesta_ia = consultar_ia(text)
-    send_message(chat_id, respuesta_ia, reply_to=message_id)
+    # ---- INGRESO ----
+    if lower.startswith("ingreso:"):
+        _, resto = texto.split(":", 1)
+        partes = resto.strip().split(" ", 1)
+        monto = float(partes[0])
+        desc = partes[1] if len(partes) > 1 else "Sin descripción"
+        create_finanza(desc, "Ingreso", monto)
+        send_message(chat_id, f"✔ Ingreso registrado: {monto} – {desc}")
+        return "OK"
 
+    # ---- FINANZAS ----
+    if "estado finanzas" in lower or "gastos este mes" in lower:
+        send_message(chat_id, resumen_finanzas())
+        return "OK"
+
+    # ---- TAREAS ----
+    if lower.startswith("tarea:"):
+        desc = texto.split(":", 1)[1].strip()
+        create_tarea(desc)
+        send_message(chat_id, f"✔ Tarea creada: {desc}")
+        return "OK"
+
+    # ---- EVENTOS ----
+    if lower.startswith("evento:"):
+        desc = texto.split(":", 1)[1].strip()
+        create_evento(desc)
+        send_message(chat_id, f"✔ Evento creado: {desc}")
+        return "OK"
+
+    # ---- PROYECTOS ----
+    if lower.startswith("proyecto:"):
+        nombre = texto.split(":", 1)[1].strip()
+        create_proyecto(nombre)
+        send_message(chat_id, f"✔ Proyecto creado: {nombre}")
+        return "OK"
+
+    # ---- IA PARA TODO LO DEMÁS ----
+    respuesta = consultar_ia(texto)
+    send_message(chat_id, respuesta)
     return "OK"
 
 
+@app.route("/", methods=["GET"])
+def home():
+    return "Ares1409 OK"
+
+
 if __name__ == "__main__":
-    # Para pruebas locales: export FLASK_ENV=development y usar ngrok
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
+
