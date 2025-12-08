@@ -53,7 +53,7 @@ def create_financial_record(movimiento: str,
                             fecha: str):
     """
     Crea un registro en la base de datos de FINANZAS Ares1409 en Notion.
-    Columnas esperadas en la base:
+    Columnas esperadas:
     - Movimiento (title)
     - Tipo (select)
     - Monto (number)
@@ -109,7 +109,7 @@ def get_financial_summary_context(days: int = 30) -> str:
     """
     query_url = f"{NOTION_BASE_URL}/databases/{NOTION_DB_FINANZAS}/query"
     body = {
-        "page_size": 100  # suficiente para uso personal
+        "page_size": 100
     }
 
     try:
@@ -141,7 +141,6 @@ def get_financial_summary_context(days: int = 30) -> str:
             except Exception:
                 continue
 
-            # Filtrar por rango de días
             if (hoy - fecha).days > days:
                 continue
 
@@ -175,7 +174,6 @@ def get_financial_summary_context(days: int = 30) -> str:
         if not lineas:
             return "No hay movimientos registrados en el periodo seleccionado."
 
-        # Limitar para no mandar demasiado texto a la IA
         return "\n".join(lineas[:80])
 
     except Exception as e:
@@ -226,7 +224,6 @@ def webhook():
     chat_id = message["chat"]["id"]
     text_raw = message.get("text", "") or ""
 
-    # Si no hay texto (por ejemplo, imagen), solo avisamos
     if not text_raw:
         send_message(chat_id, "Por ahora solo proceso texto.")
         return "OK"
@@ -234,12 +231,18 @@ def webhook():
     text = text_raw.strip()
     text_lower = text.lower()
 
+    # -------- NORMALIZACIONES BÁSICAS --------
+    # Quitamos dobles espacios y espacios alrededor de ':'
+    text_no_spaces = " ".join(text_lower.split())
+    text_compacto = text_no_spaces.replace(" : ", ":").replace(" :", ":").replace(": ", ":")
+
     # -------------------------
     # 1) REGISTRO DE GASTO
-    # Comando: "gasto: 150 tacos"
+    # Acepta variantes:
+    # "gasto:150 tacos", "gasto: 150 tacos", "GASTO : 150 tacos"
     # -------------------------
-    if text_lower.startswith("gasto:"):
-        contenido = text[len("gasto:"):].strip()
+    if text_compacto.startswith("gasto:"):
+        contenido = text_compacto[len("gasto:"):].strip()
         partes = contenido.split(" ", 1)
 
         if not partes:
@@ -273,10 +276,10 @@ def webhook():
 
     # -------------------------
     # 2) REGISTRO DE INGRESO
-    # Comando: "ingreso: 9000 sueldo"
+    # Acepta: "ingreso:9000 sueldo", "ingreso : 9000 sueldo", etc.
     # -------------------------
-    if text_lower.startswith("ingreso:"):
-        contenido = text[len("ingreso:"):].strip()
+    if text_compacto.startswith("ingreso:"):
+        contenido = text_compacto[len("ingreso:"):].strip()
         partes = contenido.split(" ", 1)
 
         if not partes:
@@ -310,9 +313,10 @@ def webhook():
 
     # -------------------------
     # 3) RESUMEN CON IA
-    # Comando: "estado finanzas"
+    # Acepta cualquier texto que contenga "estado" y "finanzas"
+    # Ej: "estado finanzas", "dame el estado de mis finanzas"
     # -------------------------
-    if text_lower.startswith("estado finanzas"):
+    if ("estado" in text_lower) and ("finanzas" in text_lower):
         contexto = get_financial_summary_context(days=30)
         respuesta = ask_gpt(
             "Analiza mis finanzas y dame un resumen y recomendaciones claras.",
@@ -322,7 +326,7 @@ def webhook():
         return "OK"
 
     # -------------------------
-    # 4) AYUDA
+    # 4) AYUDA / START
     # -------------------------
     if text_lower in ("ayuda", "help", "/start"):
         ayuda = (
@@ -340,7 +344,8 @@ def webhook():
     # -------------------------
     send_message(
         chat_id,
-        "Recibido. Puedes usar:\n"
+        "No entendí el comando.\n\n"
+        "Ejemplos:\n"
         "- gasto: 150 tacos\n"
         "- ingreso: 9000 sueldo\n"
         "- estado finanzas"
@@ -352,10 +357,6 @@ def webhook():
 def home():
     return "Ares1409 bot funcionando."
 
-
-# =========================
-#  EJECUCIÓN LOCAL
-# =========================
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
