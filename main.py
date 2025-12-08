@@ -37,7 +37,9 @@ def create_financial_record(movimiento, tipo, monto, categoria, fecha):
             "Fecha": {"date": {"start": fecha}}
         }
     }
-    requests.post(NOTION_URL, headers=HEADERS, json=data)
+    resp = requests.post(NOTION_URL, headers=HEADERS, json=data)
+    # Para depurar si algo falla
+    print("NOTION STATUS:", resp.status_code, resp.text)
 
 @app.route("/", methods=["POST"])
 def webhook():
@@ -45,12 +47,16 @@ def webhook():
 
     if "message" in data:
         chat_id = data["message"]["chat"]["id"]
-        text = data["message"].get("text", "").lower()
+        text = data["message"].get("text", "").lower().strip()
 
         # FORMATO: gasto: 150 tacos
         if text.startswith("gasto:"):
-            contenido = text.replace("gasto:", "").strip()
+            contenido = text.replace("gasto:", "", 1).strip()
             partes = contenido.split(" ", 1)
+
+            if not partes or not partes[0].replace(".", "", 1).isdigit():
+                send_message(chat_id, "Formato: gasto: 150 tacos")
+                return "OK"
 
             monto = partes[0]
             descripcion = partes[1] if len(partes) > 1 else "Sin descripción"
@@ -70,8 +76,12 @@ def webhook():
 
         # FORMATO: ingreso: 9000 sueldo
         if text.startswith("ingreso:"):
-            contenido = text.replace("ingreso:", "").strip()
+            contenido = text.replace("ingreso:", "", 1).strip()
             partes = contenido.split(" ", 1)
+
+            if not partes or not partes[0].replace(".", "", 1).isdigit():
+                send_message(chat_id, "Formato: ingreso: 9000 sueldo")
+                return "OK"
 
             monto = partes[0]
             descripcion = partes[1] if len(partes) > 1 else "Sin descripción"
@@ -90,7 +100,13 @@ def webhook():
             return "OK"
 
         # Si no es un comando reconocido
-        send_message(chat_id, f"Recibido: {text}")
+        send_message(
+            chat_id,
+            "No entendí el comando.\n"
+            "Ejemplos:\n"
+            "gasto: 150 tacos\n"
+            "ingreso: 9000 sueldo"
+        )
 
     return "OK"
 
