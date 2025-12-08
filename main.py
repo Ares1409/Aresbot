@@ -3,116 +3,360 @@ import json
 import requests
 import datetime
 from flask import Flask, request
+from openai import OpenAI
 
 app = Flask(__name__)
+
+# =========================
+#  CONFIGURACIÓN BÁSICA
+# =========================
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 NOTION_TOKEN = os.getenv("NOTION_TOKEN")
 NOTION_DB_FINANZAS = os.getenv("NOTION_DB_FINANZAS")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 TELEGRAM_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-NOTION_URL = "https://api.notion.com/v1/pages"
 
-HEADERS = {
+NOTION_BASE_URL = "https://api.notion.com/v1"
+NOTION_PAGES_URL = f"{NOTION_BASE_URL}/pages"
+
+NOTION_HEADERS = {
     "Authorization": f"Bearer {NOTION_TOKEN}",
     "Content-Type": "application/json",
     "Notion-Version": "2022-06-28"
 }
 
-def send_message(chat_id, text):
-    requests.post(TELEGRAM_URL, json={
-        "chat_id": chat_id,
-        "text": text
-    })
+# Cliente OpenAI (GPT-4o mini)
+oa_client = OpenAI(api_key=OPENAI_API_KEY)
 
-def create_financial_record(movimiento, tipo, monto, categoria, fecha):
+
+# =========================
+#  FUNCIONES AUXILIARES
+# =========================
+
+def send_message(chat_id: int, text: str):
+    """Envía un mensaje de texto a Telegram."""
+    try:
+        requests.post(
+            TELEGRAM_URL,
+            json={"chat_id": chat_id, "text": text}
+        )
+    except Exception as e:
+        print(f"[ERROR] Enviando mensaje a Telegram: {e}")
+
+
+def create_financial_record(movimiento: str,
+                            tipo: str,
+                            monto: float,
+                            categoria: str,
+                            fecha: str):
+    """
+    Crea un registro en la base de datos de FINANZAS Ares1409 en Notion.
+    Columnas esperadas en la base:
+    - Movimiento (title)
+    - Tipo (select)
+    - Monto (number)
+    - Categoría (select)
+    - Área (select)
+    - Fecha (date)
+    """
     data = {
         "parent": {"database_id": NOTION_DB_FINANZAS},
         "properties": {
-            "Movimiento": {"title": [{"text": {"content": movimiento}}]},
-            "Tipo": {"select": {"name": tipo}},
-            "Monto": {"number": float(monto)},
-            "Categoría": {"select": {"name": categoria}},
-            "Área": {"select": {"name": "Finanzas personales"}},
-            "Fecha": {"date": {"start": fecha}}
+            "Movimiento": {
+                "title": [
+                    {"text": {"content": movimiento}}
+                ]
+            },
+            "Tipo": {
+                "select": {"name": tipo}
+            },
+            "Monto": {
+                "number": float(monto)
+            },
+            "Categoría": {
+                "select": {"name": categoria}
+            },
+            "Área": {
+                "select": {"name": "Finanzas personales"}
+            },
+            "Fecha": {
+                "date": {"start": fecha}
+            }
         }
     }
-    resp = requests.post(NOTION_URL, headers=HEADERS, json=data)
-    # Para depurar si algo falla
-    print("NOTION STATUS:", resp.status_code, resp.text)
+
+    try:
+        resp = requests.post(
+            NOTION_PAGES_URL,
+            headers=NOTION_HEADERS,
+            json=data
+        )
+        if resp.status_code >= 300:
+            print("[ERROR] Notion create:", resp.status_code, resp.text)
+            return False
+        return True
+    except Exception as e:
+        print(f"[ERROR] Creando registro en Notion: {e}")
+        return False
+
+
+def get_financial_summary_context(days: int = 30) -> str:
+    """
+    Consulta Notion y genera un contexto de los últimos 'days' días
+    para que la IA pueda analizar las finanzas.
+    """
+    query_url = f"{NOTION_BASE_URL}/databases/{NOTION_DB_FINANZAS}/query"
+    body = {
+        "page_size": 100  # suficiente para uso personal
+    }
+
+    try:
+        resp = requests.post(query_url, headers=NOTION_HEADERS, json=body)
+        if resp.status_code >= 300:
+            print("[ERROR] Notion query:", resp.status_code, resp.text)
+            return "No se pudo leer la base de datos de finanzas en Notion."
+
+        data = resp.json()
+        results = data.get("results", [])
+
+        hoy = datetime.date.today()
+        lineas = []
+
+        for page in results:
+            props = page.get("properties", {})
+
+            # Fecha
+            fecha_str = (
+                props.get("Fecha", {})
+                .get("date", {})
+                .get("start")
+            )
+            if not fecha_str:
+                continue
+
+            try:
+                fecha = datetime.date.fromisoformat(fecha_str[:10])
+            except Exception:
+                continue
+
+            # Filtrar por rango de días
+            if (hoy - fecha).days > days:
+                continue
+
+            # Movimiento (title)
+            movimiento = ""
+            mov_title = props.get("Movimiento", {}).get("title", [])
+            if mov_title:
+                movimiento = mov_title[0].get("plain_text", "")
+
+            # Tipo
+            tipo = (
+                props.get("Tipo", {})
+                .get("select", {})
+                .get("name", "")
+            )
+
+            # Monto
+            monto = props.get("Monto", {}).get("number", 0) or 0
+
+            # Categoría
+            categoria = (
+                props.get("Categoría", {})
+                .get("select", {})
+                .get("name", "")
+            )
+
+            lineas.append(
+                f"{fecha.isoformat()} | {tipo} | {monto} | {categoria} | {movimiento}"
+            )
+
+        if not lineas:
+            return "No hay movimientos registrados en el periodo seleccionado."
+
+        # Limitar para no mandar demasiado texto a la IA
+        return "\n".join(lineas[:80])
+
+    except Exception as e:
+        print(f"[ERROR] Leyendo finanzas de Notion: {e}")
+        return "Ocurrió un error al leer la base de datos de Notion."
+
+
+def ask_gpt(prompt: str, contexto: str = "") -> str:
+    """Consulta GPT-4o mini con un prompt y un contexto adicional."""
+    try:
+        mensaje_usuario = f"{prompt}\n\nContexto de movimientos:\n{contexto}"
+
+        completion = oa_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Eres Ares1409, un asistente personal financiero. "
+                        "Eres claro, profesional, directo y útil."
+                    )
+                },
+                {"role": "user", "content": mensaje_usuario}
+            ],
+            temperature=0.2,
+            max_tokens=400,
+        )
+        return completion.choices[0].message.content
+    except Exception as e:
+        print(f"[ERROR] Llamando a OpenAI: {e}")
+        return f"No pude consultar la IA en este momento. Detalle técnico: {e}"
+
+
+# =========================
+#  RUTAS FLASK (WEBHOOK)
+# =========================
 
 @app.route("/", methods=["POST"])
 def webhook():
-    data = request.get_json()
+    """Webhook que recibe las actualizaciones de Telegram."""
+    data = request.get_json(force=True, silent=True) or {}
+    print("[DEBUG] Update:", json.dumps(data, ensure_ascii=False))
 
-    if "message" in data:
-        chat_id = data["message"]["chat"]["id"]
-        text = data["message"].get("text", "").lower().strip()
+    if "message" not in data:
+        return "OK"
 
-        # FORMATO: gasto: 150 tacos
-        if text.startswith("gasto:"):
-            contenido = text.replace("gasto:", "", 1).strip()
-            partes = contenido.split(" ", 1)
+    message = data["message"]
+    chat_id = message["chat"]["id"]
+    text_raw = message.get("text", "") or ""
 
-            if not partes or not partes[0].replace(".", "", 1).isdigit():
-                send_message(chat_id, "Formato: gasto: 150 tacos")
-                return "OK"
+    # Si no hay texto (por ejemplo, imagen), solo avisamos
+    if not text_raw:
+        send_message(chat_id, "Por ahora solo proceso texto.")
+        return "OK"
 
-            monto = partes[0]
-            descripcion = partes[1] if len(partes) > 1 else "Sin descripción"
+    text = text_raw.strip()
+    text_lower = text.lower()
 
-            hoy = datetime.date.today().isoformat()
+    # -------------------------
+    # 1) REGISTRO DE GASTO
+    # Comando: "gasto: 150 tacos"
+    # -------------------------
+    if text_lower.startswith("gasto:"):
+        contenido = text[len("gasto:"):].strip()
+        partes = contenido.split(" ", 1)
 
-            create_financial_record(
-                movimiento=descripcion,
-                tipo="Egreso",
-                monto=monto,
-                categoria="General",
-                fecha=hoy
-            )
-
-            send_message(chat_id, f"✔ Gasto registrado: {monto} - {descripcion}")
+        if not partes:
+            send_message(chat_id, "Formato: gasto: Monto descripción")
             return "OK"
 
-        # FORMATO: ingreso: 9000 sueldo
-        if text.startswith("ingreso:"):
-            contenido = text.replace("ingreso:", "", 1).strip()
-            partes = contenido.split(" ", 1)
+        monto_str = partes[0]
+        descripcion = partes[1] if len(partes) > 1 else "Gasto sin descripción"
 
-            if not partes or not partes[0].replace(".", "", 1).isdigit():
-                send_message(chat_id, "Formato: ingreso: 9000 sueldo")
-                return "OK"
-
-            monto = partes[0]
-            descripcion = partes[1] if len(partes) > 1 else "Sin descripción"
-
-            hoy = datetime.date.today().isoformat()
-
-            create_financial_record(
-                movimiento=descripcion,
-                tipo="Ingreso",
-                monto=monto,
-                categoria="General",
-                fecha=hoy
-            )
-
-            send_message(chat_id, f"✔ Ingreso registrado: {monto} - {descripcion}")
+        try:
+            monto = float(monto_str)
+        except ValueError:
+            send_message(chat_id, "El monto debe ser un número. Ejemplo: gasto: 150 tacos")
             return "OK"
 
-        # Si no es un comando reconocido
-        send_message(
-            chat_id,
-            "No entendí el comando.\n"
-            "Ejemplos:\n"
-            "gasto: 150 tacos\n"
-            "ingreso: 9000 sueldo"
+        hoy = datetime.date.today().isoformat()
+
+        ok = create_financial_record(
+            movimiento=descripcion,
+            tipo="Egreso",
+            monto=monto,
+            categoria="General",
+            fecha=hoy
         )
 
+        if ok:
+            send_message(chat_id, f"✔ Gasto registrado: {monto} - {descripcion}")
+        else:
+            send_message(chat_id, "Hubo un problema guardando el gasto en Notion.")
+        return "OK"
+
+    # -------------------------
+    # 2) REGISTRO DE INGRESO
+    # Comando: "ingreso: 9000 sueldo"
+    # -------------------------
+    if text_lower.startswith("ingreso:"):
+        contenido = text[len("ingreso:"):].strip()
+        partes = contenido.split(" ", 1)
+
+        if not partes:
+            send_message(chat_id, "Formato: ingreso: Monto descripción")
+            return "OK"
+
+        monto_str = partes[0]
+        descripcion = partes[1] if len(partes) > 1 else "Ingreso sin descripción"
+
+        try:
+            monto = float(monto_str)
+        except ValueError:
+            send_message(chat_id, "El monto debe ser un número. Ejemplo: ingreso: 9000 sueldo")
+            return "OK"
+
+        hoy = datetime.date.today().isoformat()
+
+        ok = create_financial_record(
+            movimiento=descripcion,
+            tipo="Ingreso",
+            monto=monto,
+            categoria="General",
+            fecha=hoy
+        )
+
+        if ok:
+            send_message(chat_id, f"✔ Ingreso registrado: {monto} - {descripcion}")
+        else:
+            send_message(chat_id, "Hubo un problema guardando el ingreso en Notion.")
+        return "OK"
+
+    # -------------------------
+    # 3) RESUMEN CON IA
+    # Comando: "estado finanzas"
+    # -------------------------
+    if text_lower.startswith("estado finanzas"):
+        contexto = get_financial_summary_context(days=30)
+        respuesta = ask_gpt(
+            "Analiza mis finanzas y dame un resumen y recomendaciones claras.",
+            contexto=contexto
+        )
+        send_message(chat_id, respuesta)
+        return "OK"
+
+    # -------------------------
+    # 4) AYUDA
+    # -------------------------
+    if text_lower in ("ayuda", "help", "/start"):
+        ayuda = (
+            "Soy Ares1409, tu asistente financiero.\n\n"
+            "Comandos disponibles:\n"
+            "- gasto: 150 tacos\n"
+            "- ingreso: 9000 sueldo\n"
+            "- estado finanzas\n"
+        )
+        send_message(chat_id, ayuda)
+        return "OK"
+
+    # -------------------------
+    # 5) MENSAJES NO RECONOCIDOS
+    # -------------------------
+    send_message(
+        chat_id,
+        "Recibido. Puedes usar:\n"
+        "- gasto: 150 tacos\n"
+        "- ingreso: 9000 sueldo\n"
+        "- estado finanzas"
+    )
     return "OK"
+
 
 @app.route("/", methods=["GET"])
 def home():
-    return "Ares1409 Bot Running"
+    return "Ares1409 bot funcionando."
+
+
+# =========================
+#  EJECUCIÓN LOCAL
+# =========================
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
