@@ -1,11 +1,43 @@
 import os
+import json
 import requests
+import datetime
 from flask import Flask, request
 
 app = Flask(__name__)
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+NOTION_TOKEN = os.getenv("NOTION_TOKEN")
+NOTION_DB_FINANZAS = os.getenv("NOTION_DB_FINANZAS")
+
 TELEGRAM_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+NOTION_URL = "https://api.notion.com/v1/pages"
+
+HEADERS = {
+    "Authorization": f"Bearer {NOTION_TOKEN}",
+    "Content-Type": "application/json",
+    "Notion-Version": "2022-06-28"
+}
+
+def send_message(chat_id, text):
+    requests.post(TELEGRAM_URL, json={
+        "chat_id": chat_id,
+        "text": text
+    })
+
+def create_financial_record(movimiento, tipo, monto, categoria, fecha):
+    data = {
+        "parent": {"database_id": NOTION_DB_FINANZAS},
+        "properties": {
+            "Movimiento": {"title": [{"text": {"content": movimiento}}]},
+            "Tipo": {"select": {"name": tipo}},
+            "Monto": {"number": float(monto)},
+            "Categoría": {"select": {"name": categoria}},
+            "Área": {"select": {"name": "Finanzas personales"}},
+            "Fecha": {"date": {"start": fecha}}
+        }
+    }
+    requests.post(NOTION_URL, headers=HEADERS, json=data)
 
 @app.route("/", methods=["POST"])
 def webhook():
@@ -13,20 +45,58 @@ def webhook():
 
     if "message" in data:
         chat_id = data["message"]["chat"]["id"]
-        text = data["message"].get("text", "")
+        text = data["message"].get("text", "").lower()
 
-        # Respuesta básica (verificamos que el bot está vivo)
-        requests.post(TELEGRAM_URL, json={
-            "chat_id": chat_id,
-            "text": f"Recibido: {text}\nTu JARVIS está en construcción."
-        })
+        # FORMATO: gasto: 150 tacos
+        if text.startswith("gasto:"):
+            contenido = text.replace("gasto:", "").strip()
+            partes = contenido.split(" ", 1)
+
+            monto = partes[0]
+            descripcion = partes[1] if len(partes) > 1 else "Sin descripción"
+
+            hoy = datetime.date.today().isoformat()
+
+            create_financial_record(
+                movimiento=descripcion,
+                tipo="Egreso",
+                monto=monto,
+                categoria="General",
+                fecha=hoy
+            )
+
+            send_message(chat_id, f"✔ Gasto registrado: {monto} - {descripcion}")
+            return "OK"
+
+        # FORMATO: ingreso: 9000 sueldo
+        if text.startswith("ingreso:"):
+            contenido = text.replace("ingreso:", "").strip()
+            partes = contenido.split(" ", 1)
+
+            monto = partes[0]
+            descripcion = partes[1] if len(partes) > 1 else "Sin descripción"
+
+            hoy = datetime.date.today().isoformat()
+
+            create_financial_record(
+                movimiento=descripcion,
+                tipo="Ingreso",
+                monto=monto,
+                categoria="General",
+                fecha=hoy
+            )
+
+            send_message(chat_id, f"✔ Ingreso registrado: {monto} - {descripcion}")
+            return "OK"
+
+        # Si no es un comando reconocido
+        send_message(chat_id, f"Recibido: {text}")
 
     return "OK"
 
 @app.route("/", methods=["GET"])
 def home():
-    return "JARVIS BOT RUNNING"
+    return "Ares1409 Bot Running"
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
