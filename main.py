@@ -47,7 +47,7 @@ MAIN_KEYBOARD = {
     "one_time_keyboard": False,
 }
 
-# Estado simple por chat para los botones
+# Estado simple por chat para los botones (máquina de estados)
 SESSIONS = {}
 
 # =========================
@@ -241,7 +241,7 @@ def create_habit(
 ):
     properties = {
         "Hábito": {"title": [{"text": {"content": nombre}}]},
-        "Área": {"select": {"name": area}},  # OJO: aquí va con acento según tu tabla
+        "Área": {"select": {"name": area}},  # columna con acento
         "Estado": {"select": {"name": estado}},
         "Número": {"number": int(numero)},
         "Notas": {"rich_text": [{"text": {"content": notas[:1800]}}]} if notas else {"rich_text": []},
@@ -841,69 +841,242 @@ def webhook():
             "o para ver tus resúmenes.",
             reply_markup=MAIN_KEYBOARD,
         )
+        # al entrar al menú limpiamos cualquier sesión rota
+        if chat_id in SESSIONS:
+            del SESSIONS[chat_id]
         return "OK"
 
-    # Si hay una sesión abierta por botones, la procesamos primero
+    # =========================
+    #  MANEJO DE SESIONES (BOTONES)
+    # =========================
     if chat_id in SESSIONS:
         session = SESSIONS[chat_id]
         mode = session.get("mode")
         step = session.get("step", 1)
+        data_s = session.setdefault("data", {})
+        lower_txt = lower
 
-        # NUEVA TAREA: solo pide descripción
+        # ---------- NUEVA TAREA ----------
         if mode == "new_task":
-            desc = text
-            create_task(desc)
-            send_message(chat_id, f"✔ Tarea creada: {desc}")
-            del SESSIONS[chat_id]
-            return "OK"
-
-        # NUEVO PROYECTO: solo pide nombre
-        if mode == "new_project":
-            nombre = text
-            create_project(nombre)
-            send_message(chat_id, f"✔ Proyecto creado: {nombre}")
-            del SESSIONS[chat_id]
-            return "OK"
-
-        # NUEVO HÁBITO: solo pide nombre
-        if mode == "new_habit":
-            nombre = text
-            create_habit(nombre)
-            send_message(chat_id, f"✔ Hábito creado: {nombre}")
-            del SESSIONS[chat_id]
-            return "OK"
-
-        # NUEVO EVENTO: título + fecha
-        if mode == "new_event":
             if step == 1:
-                session["data"]["titulo"] = text
+                data_s["titulo"] = text
                 session["step"] = 2
-                send_message(
-                    chat_id,
-                    "Indica la fecha del evento en formato `AAAA-MM-DD` o escribe `hoy`.",
-                )
+                send_message(chat_id, "Área de la tarea (ejemplo: General, Trabajo, Universidad). Si no quieres especificar, escribe `General`.", reply_markup=MAIN_KEYBOARD)
                 return "OK"
             elif step == 2:
-                fecha_txt = lower
-                if fecha_txt == "hoy":
+                data_s["area"] = text if text else "General"
+                session["step"] = 3
+                send_message(chat_id, "Fecha de la tarea en formato `AAAA-MM-DD` o escribe `hoy`.", reply_markup=MAIN_KEYBOARD)
+                return "OK"
+            elif step == 3:
+                if lower_txt == "hoy":
                     fecha = hoy_iso()
                 else:
                     try:
-                        datetime.date.fromisoformat(fecha_txt)
-                        fecha = fecha_txt
+                        datetime.date.fromisoformat(text)
+                        fecha = text
                     except ValueError:
-                        send_message(
-                            chat_id,
-                            "No entendí la fecha. Usa `AAAA-MM-DD` o escribe `hoy`.",
-                        )
+                        send_message(chat_id, "No entendí la fecha. Usa `AAAA-MM-DD` o `hoy`.", reply_markup=MAIN_KEYBOARD)
                         return "OK"
-                titulo = session["data"]["titulo"]
-                create_event(titulo, fecha=fecha)
-                send_message(chat_id, f"✔ Evento creado: {titulo} el {fecha}")
+                data_s["fecha"] = fecha
+                session["step"] = 4
+                send_message(chat_id, "Prioridad de la tarea (`Baja`, `Media` o `Alta`). Si dudas, escribe `Media`.", reply_markup=MAIN_KEYBOARD)
+                return "OK"
+            elif step == 4:
+                prioridad = text.capitalize()
+                if prioridad not in ("Baja", "Media", "Alta"):
+                    prioridad = "Media"
+                data_s["prioridad"] = prioridad
+                session["step"] = 5
+                send_message(chat_id, "Contexto de la tarea (ejemplo: PC, Teléfono, Casa). Si no necesitas, escribe `General`.", reply_markup=MAIN_KEYBOARD)
+                return "OK"
+            elif step == 5:
+                data_s["contexto"] = text if text else "General"
+                session["step"] = 6
+                send_message(chat_id, "Notas adicionales para la tarea (o escribe `no` si no quieres notas).", reply_markup=MAIN_KEYBOARD)
+                return "OK"
+            elif step == 6:
+                notas = "" if lower_txt in ("no", "ninguna", "ninguno") else text
+                data_s["notas"] = notas
+
+                create_task(
+                    nombre=data_s["titulo"],
+                    fecha=data_s["fecha"],
+                    area=data_s["area"],
+                    estado="Pendiente",
+                    prioridad=data_s["prioridad"],
+                    contexto=data_s["contexto"],
+                    notas=data_s["notas"],
+                )
+                send_message(chat_id, f"✔ Tarea creada:\n*{data_s['titulo']}* ({data_s['area']}, prioridad {data_s['prioridad']})", reply_markup=MAIN_KEYBOARD)
                 del SESSIONS[chat_id]
                 return "OK"
 
-    # Botones principales
+        # ---------- NUEVO PROYECTO ----------
+        if mode == "new_project":
+            if step == 1:
+                data_s["nombre"] = text
+                session["step"] = 2
+                send_message(chat_id, "Área del proyecto (ejemplo: Trabajo, Universidad, Personal). Usa el nombre tal cual lo tengas en Notion, por ejemplo `General`.", reply_markup=MAIN_KEYBOARD)
+                return "OK"
+            elif step == 2:
+                data_s["area"] = text if text else "General"
+                session["step"] = 3
+                send_message(chat_id, "Estado del proyecto (`Activo`, `Pausado`, `Completado`). Si dudas, `Activo`.", reply_markup=MAIN_KEYBOARD)
+                return "OK"
+            elif step == 3:
+                estado = text.capitalize() if text else "Activo"
+                if estado not in ("Activo", "Pausado", "Completado"):
+                    estado = "Activo"
+                data_s["estado"] = estado
+                session["step"] = 4
+                send_message(chat_id, "Fecha de inicio (`AAAA-MM-DD` o `hoy`).", reply_markup=MAIN_KEYBOARD)
+                return "OK"
+            elif step == 4:
+                if lower_txt == "hoy":
+                    fecha_inicio = hoy_iso()
+                else:
+                    try:
+                        datetime.date.fromisoformat(text)
+                        fecha_inicio = text
+                    except ValueError:
+                        send_message(chat_id, "No entendí la fecha. Usa `AAAA-MM-DD` o `hoy`.", reply_markup=MAIN_KEYBOARD)
+                        return "OK"
+                data_s["fecha_inicio"] = fecha_inicio
+                session["step"] = 5
+                send_message(chat_id, "Fecha objetivo de fin (`AAAA-MM-DD`) o escribe `ninguna` si aún no está definida.", reply_markup=MAIN_KEYBOARD)
+                return "OK"
+            elif step == 5:
+                if lower_txt in ("ninguna", "ninguno", "no"):
+                    fecha_fin = None
+                else:
+                    try:
+                        datetime.date.fromisoformat(text)
+                        fecha_fin = text
+                    except ValueError:
+                        send_message(chat_id, "No entendí la fecha. Usa `AAAA-MM-DD` o `ninguna`.", reply_markup=MAIN_KEYBOARD)
+                        return "OK"
+                data_s["fecha_fin"] = fecha_fin
+                session["step"] = 6
+                send_message(chat_id, "Impacto del proyecto (`Bajo`, `Medio`, `Alto`). Si dudas, `Medio`.", reply_markup=MAIN_KEYBOARD)
+                return "OK"
+            elif step == 6:
+                impacto = text.capitalize() if text else "Medio"
+                if impacto not in ("Bajo", "Medio", "Alto"):
+                    impacto = "Medio"
+                data_s["impacto"] = impacto
+                session["step"] = 7
+                send_message(chat_id, "Notas del proyecto (o escribe `no` si no quieres notas).", reply_markup=MAIN_KEYBOARD)
+                return "OK"
+            elif step == 7:
+                notas = "" if lower_txt in ("no", "ninguna", "ninguno") else text
+                data_s["notas"] = notas
+
+                create_project(
+                    nombre=data_s["nombre"],
+                    area=data_s["area"],
+                    estado=data_s["estado"],
+                    fecha_inicio=data_s["fecha_inicio"],
+                    fecha_fin=data_s["fecha_fin"],
+                    impacto=data_s["impacto"],
+                    notas=data_s["notas"],
+                )
+                send_message(chat_id, f"✔ Proyecto creado:\n*{data_s['nombre']}* ({data_s['area']}, impacto {data_s['impacto']})", reply_markup=MAIN_KEYBOARD)
+                del SESSIONS[chat_id]
+                return "OK"
+
+        # ---------- NUEVO HÁBITO ----------
+        if mode == "new_habit":
+            if step == 1:
+                data_s["nombre"] = text
+                session["step"] = 2
+                send_message(chat_id, "Área del hábito (ejemplo: Salud, Estudio, Finanzas, General).", reply_markup=MAIN_KEYBOARD)
+                return "OK"
+            elif step == 2:
+                data_s["area"] = text if text else "General"
+                session["step"] = 3
+                send_message(chat_id, "Número asociado al hábito (veces al día, pomodoros, etc.). Escribe un número entero, por ejemplo `1` o `3`.", reply_markup=MAIN_KEYBOARD)
+                return "OK"
+            elif step == 3:
+                try:
+                    numero = int(text)
+                except ValueError:
+                    numero = 1
+                data_s["numero"] = numero
+                session["step"] = 4
+                send_message(chat_id, "Notas del hábito (o escribe `no` si no quieres notas).", reply_markup=MAIN_KEYBOARD)
+                return "OK"
+            elif step == 4:
+                notas = "" if lower_txt in ("no", "ninguna", "ninguno") else text
+                data_s["notas"] = notas
+
+                create_habit(
+                    nombre=data_s["nombre"],
+                    area=data_s["area"],
+                    estado="Activo",
+                    numero=data_s["numero"],
+                    notas=data_s["notas"],
+                )
+                send_message(chat_id, f"✔ Hábito creado:\n*{data_s['nombre']}* ({data_s['area']}, número {data_s['numero']})", reply_markup=MAIN_KEYBOARD)
+                del SESSIONS[chat_id]
+                return "OK"
+
+        # ---------- NUEVO EVENTO ----------
+        if mode == "new_event":
+            if step == 1:
+                data_s["titulo"] = text
+                session["step"] = 2
+                send_message(chat_id, "Fecha del evento (`AAAA-MM-DD` o `hoy`).", reply_markup=MAIN_KEYBOARD)
+                return "OK"
+            elif step == 2:
+                if lower_txt == "hoy":
+                    fecha = hoy_iso()
+                else:
+                    try:
+                        datetime.date.fromisoformat(text)
+                        fecha = text
+                    except ValueError:
+                        send_message(chat_id, "No entendí la fecha. Usa `AAAA-MM-DD` o `hoy`.", reply_markup=MAIN_KEYBOARD)
+                        return "OK"
+                data_s["fecha"] = fecha
+                session["step"] = 3
+                send_message(chat_id, "Área del evento (ejemplo: Trabajo, Personal, Universidad, General).", reply_markup=MAIN_KEYBOARD)
+                return "OK"
+            elif step == 3:
+                data_s["area"] = text if text else "General"
+                session["step"] = 4
+                send_message(chat_id, "Tipo de evento (ejemplo: Reunión, Personal, Estudio, General).", reply_markup=MAIN_KEYBOARD)
+                return "OK"
+            elif step == 4:
+                data_s["tipo_evento"] = text if text else "General"
+                session["step"] = 5
+                send_message(chat_id, "Lugar del evento (o escribe `ninguno` si es en línea o no aplica).", reply_markup=MAIN_KEYBOARD)
+                return "OK"
+            elif step == 5:
+                lugar = "" if lower_txt in ("ninguno", "ninguna", "no") else text
+                data_s["lugar"] = lugar
+                session["step"] = 6
+                send_message(chat_id, "Notas del evento (o escribe `no` si no quieres notas).", reply_markup=MAIN_KEYBOARD)
+                return "OK"
+            elif step == 6:
+                notas = "" if lower_txt in ("no", "ninguna", "ninguno") else text
+                data_s["notas"] = notas
+
+                create_event(
+                    nombre=data_s["titulo"],
+                    fecha=data_s["fecha"],
+                    area=data_s["area"],
+                    tipo_evento=data_s["tipo_evento"],
+                    lugar=data_s["lugar"],
+                    notas=data_s["notas"],
+                )
+                send_message(chat_id, f"✔ Evento creado:\n*{data_s['titulo']}* el {data_s['fecha']} ({data_s['area']})", reply_markup=MAIN_KEYBOARD)
+                del SESSIONS[chat_id]
+                return "OK"
+
+    # =========================
+    #  INICIO DE SESIONES DESDE BOTONES
+    # =========================
     if lower == "nueva tarea":
         SESSIONS[chat_id] = {"mode": "new_task", "step": 1, "data": {}}
         send_message(chat_id, "Escribe la descripción de la nueva tarea.", reply_markup=MAIN_KEYBOARD)
@@ -932,7 +1105,9 @@ def webhook():
         send_message(chat_id, resumen_general(), reply_markup=MAIN_KEYBOARD)
         return "OK"
 
-    # Comandos tipo texto (gasto:, ingreso:, tarea:, etc.)
+    # =========================
+    #  COMANDOS TIPO TEXTO
+    # =========================
     manejado = (
         manejar_comando_finanzas(lower, chat_id)
         or manejar_comando_tareas(lower, chat_id)
@@ -944,7 +1119,9 @@ def webhook():
     if manejado:
         return "OK"
 
-    # IA por defecto
+    # =========================
+    #  IA POR DEFECTO
+    # =========================
     respuesta_ia = consultar_ia(text)
     send_message(chat_id, respuesta_ia, reply_to=message_id, reply_markup=MAIN_KEYBOARD)
 
