@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import requests
 import datetime
 from flask import Flask, request
@@ -22,8 +23,6 @@ NOTION_DB_PROYECTOS = os.getenv("NOTION_DB_PROYECTOS")
 NOTION_DB_HABITOS = os.getenv("NOTION_DB_HABITOS")
 
 TELEGRAM_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-TELEGRAM_FILE_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile"
-TELEGRAM_FILE_BASE = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/"
 
 NOTION_BASE_URL = "https://api.notion.com/v1"
 NOTION_VERSION = "2022-06-28"
@@ -36,18 +35,36 @@ NOTION_HEADERS = {
     "Notion-Version": NOTION_VERSION,
 }
 
-# Teclado principal de Telegram
+# =========================
+#  TECLADOS DE TELEGRAM
+# =========================
+
 MAIN_KEYBOARD = {
     "keyboard": [
-        ["Nueva tarea", "Nuevo evento"],
-        ["Nuevo proyecto", "Nuevo hábito"],
-        ["Resumen finanzas", "Resumen general"],
+        ["➕ Nuevo gasto", "➕ Nuevo ingreso"],
+        ["📝 Nueva tarea", "📅 Nuevo evento"],
+        ["📂 Nuevo proyecto", "✨ Nuevo hábito"],
+        ["📊 Resumen finanzas", "📋 Resumen general"],
     ],
     "resize_keyboard": True,
-    "one_time_keyboard": False,
 }
 
-# Estado simple por chat para los botones (máquina de estados)
+DATE_KEYBOARD = {
+    "keyboard": [
+        ["Hoy", "Mañana"],
+        ["Otra fecha", "Cancelar"],
+    ],
+    "resize_keyboard": True,
+    "one_time_keyboard": True,
+}
+
+CANCEL_KEYBOARD = {
+    "keyboard": [["Cancelar"]],
+    "resize_keyboard": True,
+    "one_time_keyboard": True,
+}
+
+# Memoria sencilla de conversación: chat_id -> estado
 SESSIONS = {}
 
 # =========================
@@ -64,16 +81,121 @@ def send_message(chat_id, text, reply_to=None, reply_markup=None):
         payload["reply_to_message_id"] = reply_to
     if reply_markup:
         payload["reply_markup"] = reply_markup
+
     try:
         requests.post(TELEGRAM_URL, json=payload, timeout=15)
     except Exception as e:
         print("Error enviando mensaje a Telegram:", e)
 
 
+def hoy_iso():
+    return datetime.date.today().isoformat()
+
+
+def inicio_fin_mes_actual():
+    hoy = datetime.date.today()
+    inicio = hoy.replace(day=1)
+    if hoy.month == 12:
+        fin = hoy.replace(year=hoy.year + 1, month=1, day=1) - datetime.timedelta(days=1)
+    else:
+        fin = hoy.replace(month=hoy.month + 1, day=1) - datetime.timedelta(days=1)
+    return inicio.isoformat(), fin.isoformat()
+
+
+def parse_fecha_es(texto):
+    """
+    Convierte textos como:
+    - "hoy", "mañana"
+    - "12/12/2025", "12-12-2025"
+    - "2025-12-12"
+    - "12 de diciembre", "12 diciembre 2025"
+    en fecha ISO (YYYY-MM-DD).
+    Devuelve None si no se puede interpretar.
+    """
+    texto = texto.strip().lower()
+
+    if texto in ("hoy",):
+        return hoy_iso()
+
+    if texto in ("mañana", "manana"):
+        return (datetime.date.today() + datetime.timedelta(days=1)).isoformat()
+
+    # dd/mm/aaaa o dd-mm-aaaa
+    m = re.match(r"^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})$", texto)
+    if m:
+        d, mth, y = map(int, m.groups())
+        if y < 100:
+            y += 2000
+        try:
+            return datetime.date(y, mth, d).isoformat()
+        except ValueError:
+            return None
+
+    # aaaa-mm-dd
+    m = re.match(r"^(\d{4})-(\d{1,2})-(\d{1,2})$", texto)
+    if m:
+        y, mth, d = map(int, m.groups())
+        try:
+            return datetime.date(y, mth, d).isoformat()
+        except ValueError:
+            return None
+
+    # "12 de diciembre" / "12 diciembre 2025"
+    meses = {
+        "enero": 1,
+        "febrero": 2,
+        "marzo": 3,
+        "abril": 4,
+        "mayo": 5,
+        "junio": 6,
+        "julio": 7,
+        "agosto": 8,
+        "septiembre": 9,
+        "setiembre": 9,
+        "octubre": 10,
+        "noviembre": 11,
+        "diciembre": 12,
+    }
+
+    m = re.match(
+        r"^(\d{1,2})\s*(de)?\s*([a-zá]+)(\s*de\s*(\d{4}))?$",
+        texto,
+    )
+    if m:
+        d_str, _, mes_str, _, y_str = m.groups()
+        d = int(d_str)
+        mes_str = mes_str.replace("á", "a").replace("é", "e").replace("í", "i").replace("ó", "o").replace("ú", "u")
+        mes = meses.get(mes_str)
+        if not mes:
+            return None
+        if y_str:
+            y = int(y_str)
+        else:
+            y = datetime.date.today().year
+        try:
+            return datetime.date(y, mes, d).isoformat()
+        except ValueError:
+            return None
+
+    return None
+
+
+def show_main_menu(chat_id):
+    send_message(
+        chat_id,
+        "Elige una opción del menú o escribe un comando:",
+        reply_markup=MAIN_KEYBOARD,
+    )
+
+# =========================
+#  NOTION – CREACIÓN PÁGINAS
+# =========================
+
 def notion_create_page(database_id, properties):
     if not database_id:
         print("ERROR: database_id vacío al crear página en Notion.")
-        return None
+        return False
+
     data = {"parent": {"database_id": database_id}, "properties": properties}
     try:
         r = requests.post(
@@ -84,11 +206,96 @@ def notion_create_page(database_id, properties):
         )
         if r.status_code >= 300:
             print("Error creando página en Notion:", r.status_code, r.text)
-        return r
+            return False
+        return True
     except Exception as e:
         print("Error de red creando página en Notion:", e)
-        return None
+        return False
 
+
+def create_financial_record(movimiento, tipo, monto,
+                            categoria="General",
+                            area="Finanzas personales",
+                            fecha=None):
+    if fecha is None:
+        fecha = hoy_iso()
+    properties = {
+        "Movimiento": {"title": [{"text": {"content": movimiento}}]},
+        "Tipo": {"select": {"name": tipo}},
+        "Monto": {"number": float(monto)},
+        "Categoría": {"select": {"name": categoria}},
+        "Area": {"select": {"name": area}},
+        "Fecha": {"date": {"start": fecha}},
+    }
+    return notion_create_page(NOTION_DB_FINANZAS, properties)
+
+
+def create_task(nombre, fecha=None, area="General", estado="Pendiente",
+                prioridad="Media", contexto="General", notas=""):
+    if fecha is None:
+        fecha = hoy_iso()
+    properties = {
+        "Tarea": {"title": [{"text": {"content": nombre}}]},
+        "Estado": {"select": {"name": estado}},
+        "Area": {"select": {"name": area}},
+        "Fecha": {"date": {"start": fecha}},
+        "Prioridad": {"select": {"name": prioridad}},
+        "Contexto": {"select": {"name": contexto}},
+    }
+    if notas:
+        properties["Notas"] = {"rich_text": [{"text": {"content": notas[:1800]}}]}
+    return notion_create_page(NOTION_DB_TAREAS, properties)
+
+
+def create_event(nombre, fecha, area="General", tipo_evento="General",
+                 lugar="", notas=""):
+    properties = {
+        "Evento": {"title": [{"text": {"content": nombre}}]},
+        "Fecha": {"date": {"start": fecha}},
+        "Area": {"select": {"name": area}},
+        "Tipo de Evento": {"select": {"name": tipo_evento}},
+    }
+    if lugar:
+        properties["Lugar"] = {"rich_text": [{"text": {"content": lugar[:500]}}]}
+    if notas:
+        properties["Notas"] = {"rich_text": [{"text": {"content": notas[:1800]}}]}
+    return notion_create_page(NOTION_DB_EVENTOS, properties)
+
+
+def create_project(nombre, area="General", estado="Activo",
+                   fecha_inicio=None, fecha_fin=None,
+                   impacto="Medio", notas=""):
+    if fecha_inicio is None:
+        fecha_inicio = hoy_iso()
+    properties = {
+        "Proyecto": {"title": [{"text": {"content": nombre}}]},
+        "Area": {"select": {"name": area}},
+        "Estado": {"select": {"name": estado}},
+        "Fecha Inicio": {"date": {"start": fecha_inicio}},
+        "Impacto": {"select": {"name": impacto}},
+    }
+    if fecha_fin:
+        properties["Fecha objetivo fin"] = {"date": {"start": fecha_fin}}
+    if notas:
+        properties["Notas"] = {"rich_text": [{"text": {"content": notas[:1800]}}]}
+    return notion_create_page(NOTION_DB_PROYECTOS, properties)
+
+
+def create_habit(nombre, area="General", estado="Activo",
+                 numero=1, notas=""):
+    properties = {
+        "Hábito": {"title": [{"text": {"content": nombre}}]},
+        "Area": {"select": {"name": area}},
+        "Estado": {"select": {"name": estado}},
+        "Número": {"number": int(numero)},
+    }
+    if notas:
+        properties["Notas"] = {"rich_text": [{"text": {"content": notas[:1800]}}]}
+    return notion_create_page(NOTION_DB_HABITOS, properties)
+
+# =========================
+#  CONSULTAS A NOTION
+# =========================
 
 def notion_query(database_id, body):
     if not database_id:
@@ -109,148 +316,6 @@ def notion_query(database_id, body):
         print("Error de red consultando Notion:", e)
         return {}
 
-
-def hoy_iso():
-    return datetime.date.today().isoformat()
-
-
-def inicio_fin_mes_actual():
-    hoy = datetime.date.today()
-    inicio = hoy.replace(day=1)
-    if hoy.month == 12:
-        fin = hoy.replace(year=hoy.year + 1, month=1, day=1) - datetime.timedelta(days=1)
-    else:
-        fin = hoy.replace(month=hoy.month + 1, day=1) - datetime.timedelta(days=1)
-    return inicio.isoformat(), fin.isoformat()
-
-
-def mes_y_anio(fecha_iso: str):
-    d = datetime.date.fromisoformat(fecha_iso)
-    meses = [
-        "enero", "febrero", "marzo", "abril", "mayo", "junio",
-        "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre",
-    ]
-    return meses[d.month - 1], d.year
-
-# =========================
-#  CREACIÓN DE REGISTROS
-# =========================
-
-def create_financial_record(
-    movimiento,
-    tipo,
-    monto,
-    categoria="General",
-    area="Finanzas personales",
-    fecha=None,
-    metodo="General",
-    notas="",
-):
-    if fecha is None:
-        fecha = hoy_iso()
-
-    mes, anio = mes_y_anio(fecha)
-
-    properties = {
-        "Movimiento": {"title": [{"text": {"content": movimiento}}]},
-        "Tipo": {"select": {"name": tipo}},          # Ingreso / Egreso
-        "Monto": {"number": float(monto)},
-        "Categoría": {"select": {"name": categoria}},
-        "Area": {"select": {"name": area}},
-        "Fecha": {"date": {"start": fecha}},
-        "Método": {"select": {"name": metodo}},
-        "Notas": {"rich_text": [{"text": {"content": notas[:1800]}}]} if notas else {"rich_text": []},
-        "Mes": {"select": {"name": mes}},
-        "Año": {"number": int(anio)},
-    }
-    notion_create_page(NOTION_DB_FINANZAS, properties)
-
-
-def create_task(
-    nombre,
-    fecha=None,
-    area="General",
-    estado="Pendiente",
-    prioridad="Media",
-    contexto="General",
-    notas="",
-):
-    if fecha is None:
-        fecha = hoy_iso()
-    properties = {
-        "Tarea": {"title": [{"text": {"content": nombre}}]},
-        "Estado": {"select": {"name": estado}},
-        "Area": {"select": {"name": area}},
-        "Fecha": {"date": {"start": fecha}},
-        "Prioridad": {"select": {"name": prioridad}},
-        "Contexto": {"select": {"name": contexto}},
-        "Notas": {"rich_text": [{"text": {"content": notas[:1800]}}]} if notas else {"rich_text": []},
-    }
-    notion_create_page(NOTION_DB_TAREAS, properties)
-
-
-def create_event(
-    nombre,
-    fecha,
-    area="General",
-    tipo_evento="General",
-    lugar="",
-    notas="",
-):
-    properties = {
-        "Evento": {"title": [{"text": {"content": nombre}}]},
-        "Fecha": {"date": {"start": fecha}},
-        "Area": {"select": {"name": area}},
-        "Tipo de Evento": {"select": {"name": tipo_evento}},
-        "Lugar": {"rich_text": [{"text": {"content": lugar[:500]}}]} if lugar else {"rich_text": []},
-        "Notas": {"rich_text": [{"text": {"content": notas[:1800]}}]} if notas else {"rich_text": []},
-    }
-    notion_create_page(NOTION_DB_EVENTOS, properties)
-
-
-def create_project(
-    nombre,
-    area="General",
-    estado="Activo",
-    fecha_inicio=None,
-    fecha_fin=None,
-    impacto="Medio",
-    notas="",
-):
-    if fecha_inicio is None:
-        fecha_inicio = hoy_iso()
-    properties = {
-        "Proyecto": {"title": [{"text": {"content": nombre}}]},
-        "Area": {"select": {"name": area}},
-        "Estado": {"select": {"name": estado}},
-        "Fecha Inicio": {"date": {"start": fecha_inicio}},
-        "Impacto": {"select": {"name": impacto}},
-        "Notas": {"rich_text": [{"text": {"content": notas[:1800]}}]} if notas else {"rich_text": []},
-    }
-    if fecha_fin:
-        properties["Fecha objetivo fin"] = {"date": {"start": fecha_fin}}
-    notion_create_page(NOTION_DB_PROYECTOS, properties)
-
-
-def create_habit(
-    nombre,
-    area="General",
-    estado="Activo",
-    numero=1,
-    notas="",
-):
-    properties = {
-        "Hábito": {"title": [{"text": {"content": nombre}}]},
-        "Área": {"select": {"name": area}},  # columna con acento
-        "Estado": {"select": {"name": estado}},
-        "Número": {"number": int(numero)},
-        "Notas": {"rich_text": [{"text": {"content": notas[:1800]}}]} if notas else {"rich_text": []},
-    }
-    notion_create_page(NOTION_DB_HABITOS, properties)
-
-# =========================
-#  CONSULTAS E INFORMES
-# =========================
 
 def resumen_finanzas_mes():
     inicio, fin = inicio_fin_mes_actual()
@@ -383,64 +448,6 @@ def listar_habitos_activos(limit=20):
     return "\n".join(lineas)
 
 
-def tareas_pendientes_por_area():
-    body = {
-        "filter": {"property": "Estado", "select": {"does_not_equal": "Completada"}},
-        "page_size": 100,
-    }
-    data = notion_query(NOTION_DB_TAREAS, body)
-    resultados = data.get("results", [])
-    if not resultados:
-        return "No tienes tareas pendientes. 😌"
-
-    por_area = {}
-    for page in resultados:
-        props = page.get("properties", {})
-        area = (props.get("Area", {}).get("select", {}) or {}).get("name", "Sin área")
-        titulo = props.get("Tarea", {}).get("title", [])
-        nombre = titulo[0]["plain_text"] if titulo else "Tarea sin nombre"
-        por_area.setdefault(area, []).append(nombre)
-
-    lineas = ["*Tareas pendientes por área:*"]
-    for area, tareas in por_area.items():
-        lineas.append(f"- *{area}*:")
-        for t in tareas:
-            lineas.append(f"  • {t}")
-    return "\n".join(lineas)
-
-
-def resumen_general():
-    partes = []
-    try:
-        partes.append(resumen_finanzas_mes())
-    except Exception:
-        partes.append("No se pudo obtener el resumen financiero.")
-
-    try:
-        partes.append(tareas_pendientes_por_area())
-    except Exception:
-        partes.append("No se pudieron obtener las tareas pendientes.")
-
-    try:
-        partes.append(listar_eventos_hoy_y_proximos(7))
-    except Exception:
-        partes.append("No se pudieron obtener los próximos eventos.")
-
-    try:
-        partes.append(listar_proyectos_activos(20))
-    except Exception:
-        partes.append("No se pudieron obtener los proyectos.")
-    try:
-        partes.append(listar_habitos_activos(20))
-    except Exception:
-        partes.append("No se pudieron obtener los hábitos.")
-
-    return "\n\n".join(partes)
-
-# =========================
-#  CONTEXTO PARA IA
-# =========================
-
 def snapshot_contexto():
     try:
         resumen_fin = resumen_finanzas_mes()
@@ -473,11 +480,14 @@ def snapshot_contexto():
     )
     return contexto
 
+# =========================
+#  IA – PERSONALIDAD ARES
+# =========================
 
 def consultar_ia(mensaje_usuario):
     contexto = snapshot_contexto()
     prompt = (
-        "Eres *Ares*, una asistente personal femenina, profesional, amable, organizada y muy eficiente. "
+        "Eres *Ares*, una asistente personal femenina, profesional, organizada y muy eficiente. "
         "Hablas SIEMPRE en español. Tu tono es de secretaria ejecutiva personal: educada, clara, respetuosa y cercana, "
         "con un estilo cálido pero profesional. No des discursos largos, ve al punto.\n\n"
         "Tu objetivo es ayudar a Manuel a gestionar sus finanzas, tareas, eventos, proyectos y hábitos, "
@@ -520,142 +530,304 @@ def consultar_ia(mensaje_usuario):
         )
 
 # =========================
-#  IMÁGENES: FOTO → OCR → NOTION
+#  GESTIÓN DE SESIONES (BOTONES)
 # =========================
 
-def get_telegram_file_url(file_id):
-    try:
-        r = requests.get(TELEGRAM_FILE_URL, params={"file_id": file_id}, timeout=15)
-        data = r.json()
-        if not data.get("ok"):
-            print("Error getFile Telegram:", data)
-            return None
-        file_path = data["result"]["file_path"]
-        return TELEGRAM_FILE_BASE + file_path
-    except Exception as e:
-        print("Error obteniendo archivo de Telegram:", e)
-        return None
+def cancelar_sesion(chat_id):
+    if chat_id in SESSIONS:
+        del SESSIONS[chat_id]
+    send_message(chat_id, "Operación cancelada. Volvemos al menú principal.", reply_markup=MAIN_KEYBOARD)
 
 
-def procesar_imagen_notas(image_url):
-    system_prompt = (
-        "Eres una asistente que lee apuntes escritos en una imagen y los convierte "
-        "en información estructurada para finanzas, tareas, eventos, proyectos y hábitos.\n\n"
-        "Devuelve SIEMPRE un JSON válido con exactamente esta estructura:\n\n"
-        "{\n"
-        '  "finanzas": [\n'
-        '    {"tipo": "Ingreso" o "Egreso", "monto": número, "descripcion": "texto"}\n'
-        "  ],\n"
-        '  "tareas": [\n'
-        '    {"titulo": "texto de la tarea", "fecha": "YYYY-MM-DD" o null}\n'
-        "  ],\n"
-        '  "eventos": [\n'
-        '    {"titulo": "texto del evento", "fecha": "YYYY-MM-DD" o null, "lugar": "texto o null"}\n'
-        "  ],\n"
-        '  "proyectos": [\n'
-        '    {"nombre": "nombre del proyecto"}\n'
-        "  ],\n"
-        '  "habitos": [\n'
-        '    {"nombre": "nombre del hábito"}\n'
-        "  ]\n"
-        "}\n\n"
-        "Si algún apartado no aparece en los apuntes, devuélvelo como lista vacía."
-    )
+def handle_session(chat_id, text):
+    # Si no hay sesión activa, no hacemos nada
+    if chat_id not in SESSIONS:
+        return False
 
-    user_prompt = (
-        "Lee cuidadosamente los apuntes de la imagen y extrae cualquier gasto, ingreso, "
-        "tarea, evento, proyecto o hábito que encuentres. No expliques nada, solo regresa el JSON."
-    )
+    estado = SESSIONS[chat_id]
 
-    try:
-        resp = client.responses.create(
-            model="gpt-4.1-mini",
-            input=[
-                {
-                    "role": "system",
-                    "content": [{"type": "input_text", "text": system_prompt}],
-                },
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "input_text", "text": user_prompt},
-                        {"type": "input_image", "image_url": {"url": image_url}},
-                    ],
-                },
-            ],
-        )
+    if text.lower().strip() == "cancelar":
+        cancelar_sesion(chat_id)
+        return True
 
-        text = ""
-        try:
-            text = resp.output[0].content[0].text
-        except Exception:
-            pass
-        if not text:
+    tipo = estado.get("tipo")
+    paso = estado.get("paso", 1)
+
+    # ---- NUEVO GASTO ----
+    if tipo == "gasto":
+        if paso == 1:
+            # Esperamos monto
             try:
-                text = resp.output_text
-            except Exception:
-                text = ""
-        text = text.strip()
-        start = text.find("{")
-        end = text.rfind("}")
-        if start != -1 and end != -1:
-            text = text[start : end + 1]
-        data = json.loads(text)
-        return data
-    except Exception as e:
-        print("Error procesando imagen con OpenAI:", e)
-        return {}
+                monto = float(text.replace(",", ""))
+            except ValueError:
+                send_message(chat_id, "No entendí el monto. Escribe solo el número, por ejemplo: 250", reply_markup=CANCEL_KEYBOARD)
+                return True
+            estado["monto"] = monto
+            estado["paso"] = 2
+            send_message(chat_id, "Perfecto. Ahora dime una descripción breve del gasto (por ejemplo: gasolina Clio).", reply_markup=CANCEL_KEYBOARD)
+            return True
 
+        if paso == 2:
+            estado["descripcion"] = text.strip() or "Sin descripción"
+            estado["paso"] = 3
+            send_message(chat_id, "¿Para qué fecha registro este gasto?", reply_markup=DATE_KEYBOARD)
+            return True
 
-def guardar_notas_estructuradas(desde_imagen):
-    # Finanzas
-    for mov in desde_imagen.get("finanzas", []):
-        try:
-            tipo = mov.get("tipo", "Egreso")
-            monto = float(mov.get("monto", 0))
-            desc = mov.get("descripcion") or "Sin descripción"
-            if monto != 0:
-                create_financial_record(desc, tipo=tipo, monto=monto)
-        except Exception as e:
-            print("Error guardando movimiento desde imagen:", e)
+        if paso == 3:
+            if text.lower() in ("hoy", "mañana", "manana"):
+                fecha = parse_fecha_es(text)
+            elif text.lower() == "otra fecha":
+                send_message(chat_id, "Escribe la fecha en formato `dd/mm/aaaa` o `12 de diciembre 2025`.", reply_markup=CANCEL_KEYBOARD)
+                estado["paso"] = 4
+                return True
+            else:
+                fecha = parse_fecha_es(text)
 
-    # Tareas
-    for t in desde_imagen.get("tareas", []):
-        titulo = t.get("titulo") or "Tarea sin título"
-        fecha = t.get("fecha") or None
-        create_task(titulo, fecha=fecha)
+            if not fecha:
+                send_message(chat_id, "No pude entender la fecha. Usa algo como `09/12/2025` o `12 de diciembre`.", reply_markup=CANCEL_KEYBOARD)
+                return True
 
-    # Eventos
-    for ev in desde_imagen.get("eventos", []):
-        titulo = ev.get("titulo") or "Evento sin título"
-        fecha = ev.get("fecha") or hoy_iso()
-        lugar = ev.get("lugar") or ""
-        create_event(titulo, fecha=fecha, lugar=lugar)
+            ok = create_financial_record(
+                movimiento=estado["descripcion"],
+                tipo="Egreso",
+                monto=estado["monto"],
+                fecha=fecha,
+            )
+            cancelar_sesion(chat_id)
+            if ok:
+                send_message(chat_id, f"✔ Gasto registrado: {estado['monto']} – {estado['descripcion']} ({fecha})")
+            else:
+                send_message(chat_id, "Hubo un problema guardando el gasto en Notion.")
+            return True
 
-    # Proyectos
-    for p in desde_imagen.get("proyectos", []):
-        nombre = p.get("nombre") or "Proyecto sin nombre"
-        create_project(nombre)
+        if paso == 4:
+            fecha = parse_fecha_es(text)
+            if not fecha:
+                send_message(chat_id, "No pude entender la fecha. Prueba con `09/12/2025` o `12 de diciembre`.", reply_markup=CANCEL_KEYBOARD)
+                return True
+            ok = create_financial_record(
+                movimiento=estado["descripcion"],
+                tipo="Egreso",
+                monto=estado["monto"],
+                fecha=fecha,
+            )
+            cancelar_sesion(chat_id)
+            if ok:
+                send_message(chat_id, f"✔ Gasto registrado: {estado['monto']} – {estado['descripcion']} ({fecha})")
+            else:
+                send_message(chat_id, "Hubo un problema guardando el gasto en Notion.")
+            return True
 
-    # Hábitos
-    for h in desde_imagen.get("habitos", []):
-        nombre = h.get("nombre") or "Hábito sin nombre"
-        create_habit(nombre)
+    # ---- NUEVO INGRESO ----
+    if tipo == "ingreso":
+        if paso == 1:
+            try:
+                monto = float(text.replace(",", ""))
+            except ValueError:
+                send_message(chat_id, "No entendí el monto. Escribe solo el número, por ejemplo: 2000", reply_markup=CANCEL_KEYBOARD)
+                return True
+            estado["monto"] = monto
+            estado["paso"] = 2
+            send_message(chat_id, "Listo. Ahora dime una descripción breve del ingreso (por ejemplo: sueldo, ventas).", reply_markup=CANCEL_KEYBOARD)
+            return True
+
+        if paso == 2:
+            estado["descripcion"] = text.strip() or "Sin descripción"
+            estado["paso"] = 3
+            send_message(chat_id, "¿Para qué fecha registro este ingreso?", reply_markup=DATE_KEYBOARD)
+            return True
+
+        if paso == 3:
+            if text.lower() in ("hoy", "mañana", "manana"):
+                fecha = parse_fecha_es(text)
+            elif text.lower() == "otra fecha":
+                send_message(chat_id, "Escribe la fecha en formato `dd/mm/aaaa` o `12 de diciembre 2025`.", reply_markup=CANCEL_KEYBOARD)
+                estado["paso"] = 4
+                return True
+            else:
+                fecha = parse_fecha_es(text)
+
+            if not fecha:
+                send_message(chat_id, "No pude entender la fecha. Usa algo como `09/12/2025` o `12 de diciembre`.", reply_markup=CANCEL_KEYBOARD)
+                return True
+
+            ok = create_financial_record(
+                movimiento=estado["descripcion"],
+                tipo="Ingreso",
+                monto=estado["monto"],
+                fecha=fecha,
+            )
+            cancelar_sesion(chat_id)
+            if ok:
+                send_message(chat_id, f"✔ Ingreso registrado: {estado['monto']} – {estado['descripcion']} ({fecha})")
+            else:
+                send_message(chat_id, "Hubo un problema guardando el ingreso en Notion.")
+            return True
+
+        if paso == 4:
+            fecha = parse_fecha_es(text)
+            if not fecha:
+                send_message(chat_id, "No pude entender la fecha. Prueba con `09/12/2025` o `12 de diciembre`.", reply_markup=CANCEL_KEYBOARD)
+                return True
+            ok = create_financial_record(
+                movimiento=estado["descripcion"],
+                tipo="Ingreso",
+                monto=estado["monto"],
+                fecha=fecha,
+            )
+            cancelar_sesion(chat_id)
+            if ok:
+                send_message(chat_id, f"✔ Ingreso registrado: {estado['monto']} – {estado['descripcion']} ({fecha})")
+            else:
+                send_message(chat_id, "Hubo un problema guardando el ingreso en Notion.")
+            return True
+
+    # ---- NUEVA TAREA ----
+    if tipo == "tarea":
+        if paso == 1:
+            estado["titulo"] = text.strip()
+            if not estado["titulo"]:
+                send_message(chat_id, "Escribe el título de la tarea.", reply_markup=CANCEL_KEYBOARD)
+                return True
+            estado["paso"] = 2
+            send_message(chat_id, "¿Para qué fecha pongo la tarea?", reply_markup=DATE_KEYBOARD)
+            return True
+
+        if paso == 2:
+            if text.lower() in ("hoy", "mañana", "manana"):
+                fecha = parse_fecha_es(text)
+            elif text.lower() == "otra fecha":
+                send_message(chat_id, "Escribe la fecha de la tarea (`dd/mm/aaaa` o `12 de diciembre`).", reply_markup=CANCEL_KEYBOARD)
+                estado["paso"] = 3
+                return True
+            else:
+                fecha = parse_fecha_es(text)
+
+            if not fecha:
+                send_message(chat_id, "No entendí la fecha. Prueba con `09/12/2025` o `12 de diciembre`.", reply_markup=CANCEL_KEYBOARD)
+                return True
+
+            ok = create_task(estado["titulo"], fecha=fecha)
+            cancelar_sesion(chat_id)
+            if ok:
+                send_message(chat_id, f"✔ Tarea creada: {estado['titulo']} ({fecha})")
+            else:
+                send_message(chat_id, "Hubo un problema guardando la tarea en Notion.")
+            return True
+
+        if paso == 3:
+            fecha = parse_fecha_es(text)
+            if not fecha:
+                send_message(chat_id, "No entendí la fecha. Prueba con `09/12/2025` o `12 de diciembre`.", reply_markup=CANCEL_KEYBOARD)
+                return True
+            ok = create_task(estado["titulo"], fecha=fecha)
+            cancelar_sesion(chat_id)
+            if ok:
+                send_message(chat_id, f"✔ Tarea creada: {estado['titulo']} ({fecha})")
+            else:
+                send_message(chat_id, "Hubo un problema guardando la tarea en Notion.")
+            return True
+
+    # ---- NUEVO EVENTO ----
+    if tipo == "evento":
+        if paso == 1:
+            estado["titulo"] = text.strip()
+            if not estado["titulo"]:
+                send_message(chat_id, "Escribe el nombre del evento.", reply_markup=CANCEL_KEYBOARD)
+                return True
+            estado["paso"] = 2
+            send_message(chat_id, "¿Para qué fecha registro el evento?", reply_markup=DATE_KEYBOARD)
+            return True
+
+        if paso == 2:
+            if text.lower() in ("hoy", "mañana", "manana"):
+                fecha = parse_fecha_es(text)
+            elif text.lower() == "otra fecha":
+                send_message(chat_id, "Escribe la fecha del evento (`dd/mm/aaaa` o `12 de diciembre`).", reply_markup=CANCEL_KEYBOARD)
+                estado["paso"] = 3
+                return True
+            else:
+                fecha = parse_fecha_es(text)
+
+            if not fecha:
+                send_message(chat_id, "No entendí la fecha. Prueba con `09/12/2025` o `12 de diciembre`.", reply_markup=CANCEL_KEYBOARD)
+                return True
+
+            ok = create_event(estado["titulo"], fecha=fecha)
+            cancelar_sesion(chat_id)
+            if ok:
+                send_message(chat_id, f"✔ Evento creado: {estado['titulo']} ({fecha})")
+            else:
+                send_message(chat_id, "Hubo un problema guardando el evento en Notion.")
+            return True
+
+        if paso == 3:
+            fecha = parse_fecha_es(text)
+            if not fecha:
+                send_message(chat_id, "No entendí la fecha. Prueba con `09/12/2025` o `12 de diciembre`.", reply_markup=CANCEL_KEYBOARD)
+                return True
+            ok = create_event(estado["titulo"], fecha=fecha)
+            cancelar_sesion(chat_id)
+            if ok:
+                send_message(chat_id, f"✔ Evento creado: {estado['titulo']} ({fecha})")
+            else:
+                send_message(chat_id, "Hubo un problema guardando el evento en Notion.")
+            return True
+
+    # ---- NUEVO PROYECTO ----
+    if tipo == "proyecto":
+        if paso == 1:
+            titulo = text.strip()
+            if not titulo:
+                send_message(chat_id, "Escribe el nombre del proyecto.", reply_markup=CANCEL_KEYBOARD)
+                return True
+            ok = create_project(titulo)
+            cancelar_sesion(chat_id)
+            if ok:
+                send_message(chat_id, f"✔ Proyecto creado: {titulo}")
+            else:
+                send_message(chat_id, "Hubo un problema guardando el proyecto en Notion.")
+            return True
+
+    # ---- NUEVO HÁBITO ----
+    if tipo == "habito":
+        if paso == 1:
+            titulo = text.strip()
+            if not titulo:
+                send_message(chat_id, "Escribe el nombre del hábito.", reply_markup=CANCEL_KEYBOARD)
+                return True
+            ok = create_habit(titulo)
+            cancelar_sesion(chat_id)
+            if ok:
+                send_message(chat_id, f"✔ Hábito creado: {titulo}")
+            else:
+                send_message(chat_id, "Hubo un problema guardando el hábito en Notion.")
+            return True
+
+    return False  # por si algo se escapa
 
 # =========================
-#  PARSEO DE COMANDOS (TEXTO PLANO)
+#  PARSEO DE COMANDOS DE TEXTO
 # =========================
 
 HELP_TEXT = (
-    "*Ares1409 – Comandos rápidos*\n\n"
-    "Botones disponibles en el teclado:\n"
-    "• Nueva tarea\n"
-    "• Nuevo evento\n"
-    "• Nuevo proyecto\n"
-    "• Nuevo hábito\n"
-    "• Resumen finanzas\n"
-    "• Resumen general\n\n"
-    "También puedes usar texto libre y Ares usará IA para ayudarte."
+    "*Ares1409 – Menú rápido*\n\n"
+    "Usa los botones del teclado para crear gastos, ingresos, tareas, eventos, proyectos y hábitos.\n\n"
+    "También puedes usar comandos de texto:\n"
+    "• `gasto: 150 tacos`\n"
+    "• `ingreso: 9000 sueldo`\n"
+    "• `tarea: llamar a proveedor mañana`\n"
+    "• `evento: junta kaizen viernes`\n"
+    "• `proyecto: LoopMX segunda mano`\n"
+    "• `hábito: leer 20 minutos`\n\n"
+    "Consultas rápidas:\n"
+    "• `estado finanzas`\n"
+    "• `ingresos este mes` o `ingresos`\n"
+    "• `gastos este mes` o `gastos`\n"
+    "• `tareas hoy`\n"
+    "• `eventos hoy`\n"
+    "• `proyectos activos`\n"
+    "• `hábitos activos`\n"
 )
 
 
@@ -673,8 +845,11 @@ def manejar_comando_finanzas(texto, chat_id):
         except ValueError:
             send_message(chat_id, "No entendí el monto. Usa algo como: `gasto: 150 tacos`")
             return True
-        create_financial_record(movimiento=descripcion, tipo="Egreso", monto=monto_num)
-        send_message(chat_id, f"✔ Gasto registrado: {monto_num} – {descripcion}")
+        ok = create_financial_record(movimiento=descripcion, tipo="Egreso", monto=monto_num)
+        if ok:
+            send_message(chat_id, f"✔ Gasto registrado: {monto_num} – {descripcion}")
+        else:
+            send_message(chat_id, "Hubo un problema guardando el gasto en Notion.")
         return True
 
     if texto.startswith("ingreso:"):
@@ -690,8 +865,11 @@ def manejar_comando_finanzas(texto, chat_id):
         except ValueError:
             send_message(chat_id, "No entendí el monto. Usa algo como: `ingreso: 9000 sueldo`")
             return True
-        create_financial_record(movimiento=descripcion, tipo="Ingreso", monto=monto_num)
-        send_message(chat_id, f"✔ Ingreso registrado: {monto_num} – {descripcion}")
+        ok = create_financial_record(movimiento=descripcion, tipo="Ingreso", monto=monto_num)
+        if ok:
+            send_message(chat_id, f"✔ Ingreso registrado: {monto_num} – {descripcion}")
+        else:
+            send_message(chat_id, "Hubo un problema guardando el ingreso en Notion.")
         return True
 
     if "estado finanzas" in texto or "balance este mes" in texto:
@@ -715,8 +893,11 @@ def manejar_comando_tareas(texto, chat_id):
         if not descripcion:
             send_message(chat_id, "Formato: `tarea: descripción de la tarea`")
             return True
-        create_task(descripcion)
-        send_message(chat_id, f"✔ Tarea creada: {descripcion}")
+        ok = create_task(descripcion)
+        if ok:
+            send_message(chat_id, f"✔ Tarea creada: {descripcion}")
+        else:
+            send_message(chat_id, "Hubo un problema guardando la tarea en Notion.")
         return True
 
     if "tareas hoy" in texto or "tareas atrasadas" in texto:
@@ -732,8 +913,11 @@ def manejar_comando_eventos(texto, chat_id):
         if not descripcion:
             send_message(chat_id, "Formato rápido: `evento: junta kaizen viernes 16:00`")
             return True
-        create_event(descripcion, fecha=hoy_iso())
-        send_message(chat_id, f"✔ Evento creado (hoy): {descripcion}")
+        ok = create_event(descripcion, fecha=hoy_iso())
+        if ok:
+            send_message(chat_id, f"✔ Evento creado (hoy): {descripcion}")
+        else:
+            send_message(chat_id, "Hubo un problema guardando el evento en Notion.")
         return True
 
     if "eventos hoy" in texto or "agenda" in texto:
@@ -749,8 +933,11 @@ def manejar_comando_proyectos(texto, chat_id):
         if not nombre:
             send_message(chat_id, "Formato: `proyecto: nombre del proyecto`")
             return True
-        create_project(nombre)
-        send_message(chat_id, f"✔ Proyecto creado: {nombre}")
+        ok = create_project(nombre)
+        if ok:
+            send_message(chat_id, f"✔ Proyecto creado: {nombre}")
+        else:
+            send_message(chat_id, "Hubo un problema guardando el proyecto en Notion.")
         return True
 
     if "proyectos activos" in texto:
@@ -766,8 +953,11 @@ def manejar_comando_habitos(texto, chat_id):
         if not nombre:
             send_message(chat_id, "Formato: `hábito: descripción del hábito`")
             return True
-        create_habit(nombre)
-        send_message(chat_id, f"✔ Hábito creado: {nombre}")
+        ok = create_habit(nombre)
+        if ok:
+            send_message(chat_id, f"✔ Hábito creado: {nombre}")
+        else:
+            send_message(chat_id, "Hubo un problema guardando el hábito en Notion.")
         return True
 
     if "hábitos activos" in texto or "habitos activos" in texto:
@@ -796,318 +986,66 @@ def webhook():
 
     chat_id = message["chat"]["id"]
     message_id = message.get("message_id")
-
-    # FOTO → OCR → NOTION
-    if "photo" in message:
-        photo_sizes = message["photo"]
-        file_id = photo_sizes[-1]["file_id"]  # mayor resolución
-        file_url = get_telegram_file_url(file_id)
-        if not file_url:
-            send_message(chat_id, "No pude descargar la imagen, intenta de nuevo por favor.")
-            return "OK"
-
-        send_message(
-            chat_id,
-            "Dame un momento, voy a leer tus apuntes y organizarlos en Notion…",
-            reply_to=message_id,
-        )
-        data_notas = procesar_imagen_notas(file_url)
-        if not data_notas:
-            send_message(chat_id, "No pude interpretar la imagen. Intenta que la foto sea más clara.")
-            return "OK"
-
-        guardar_notas_estructuradas(data_notas)
-        send_message(chat_id, "Listo, ya guardé lo que encontré en tus apuntes en Notion. ✅")
-        return "OK"
-
-    # TEXTO
     text = (message.get("text") or "").strip()
 
+    # Primero, manejar sesiones activas (flujos de botones)
+    if text:
+        if handle_session(chat_id, text):
+            return "OK"
+
     if not text:
-        send_message(
-            chat_id,
-            "Solo entiendo mensajes de texto o fotos de apuntes por ahora. 🙂",
-            reply_markup=MAIN_KEYBOARD,
-        )
+        send_message(chat_id, "Solo entiendo mensajes de texto por ahora. 🙂")
         return "OK"
 
     lower = text.lower().strip()
 
-    # Comandos de inicio / menú
-    if lower in ("/start", "ayuda", "/help", "help", "menu", "menú"):
-        send_message(
-            chat_id,
-            "Hola Manuel, soy Ares. Usa los botones para crear tareas, eventos, proyectos, hábitos "
-            "o para ver tus resúmenes.",
-            reply_markup=MAIN_KEYBOARD,
-        )
-        # al entrar al menú limpiamos cualquier sesión rota
-        if chat_id in SESSIONS:
-            del SESSIONS[chat_id]
+    # /start o ayuda
+    if lower in ("/start", "ayuda", "/help", "help"):
+        send_message(chat_id, "Hola Manuel, soy Ares. Te ayudo a manejar tus finanzas, tareas, eventos, proyectos y hábitos.")
+        send_message(chat_id, HELP_TEXT)
+        show_main_menu(chat_id)
         return "OK"
 
-    # =========================
-    #  MANEJO DE SESIONES (BOTONES)
-    # =========================
-    if chat_id in SESSIONS:
-        session = SESSIONS[chat_id]
-        mode = session.get("mode")
-        step = session.get("step", 1)
-        data_s = session.setdefault("data", {})
-        lower_txt = lower
-
-        # ---------- NUEVA TAREA ----------
-        if mode == "new_task":
-            if step == 1:
-                data_s["titulo"] = text
-                session["step"] = 2
-                send_message(chat_id, "Área de la tarea (ejemplo: General, Trabajo, Universidad). Si no quieres especificar, escribe `General`.", reply_markup=MAIN_KEYBOARD)
-                return "OK"
-            elif step == 2:
-                data_s["area"] = text if text else "General"
-                session["step"] = 3
-                send_message(chat_id, "Fecha de la tarea en formato `AAAA-MM-DD` o escribe `hoy`.", reply_markup=MAIN_KEYBOARD)
-                return "OK"
-            elif step == 3:
-                if lower_txt == "hoy":
-                    fecha = hoy_iso()
-                else:
-                    try:
-                        datetime.date.fromisoformat(text)
-                        fecha = text
-                    except ValueError:
-                        send_message(chat_id, "No entendí la fecha. Usa `AAAA-MM-DD` o `hoy`.", reply_markup=MAIN_KEYBOARD)
-                        return "OK"
-                data_s["fecha"] = fecha
-                session["step"] = 4
-                send_message(chat_id, "Prioridad de la tarea (`Baja`, `Media` o `Alta`). Si dudas, escribe `Media`.", reply_markup=MAIN_KEYBOARD)
-                return "OK"
-            elif step == 4:
-                prioridad = text.capitalize()
-                if prioridad not in ("Baja", "Media", "Alta"):
-                    prioridad = "Media"
-                data_s["prioridad"] = prioridad
-                session["step"] = 5
-                send_message(chat_id, "Contexto de la tarea (ejemplo: PC, Teléfono, Casa). Si no necesitas, escribe `General`.", reply_markup=MAIN_KEYBOARD)
-                return "OK"
-            elif step == 5:
-                data_s["contexto"] = text if text else "General"
-                session["step"] = 6
-                send_message(chat_id, "Notas adicionales para la tarea (o escribe `no` si no quieres notas).", reply_markup=MAIN_KEYBOARD)
-                return "OK"
-            elif step == 6:
-                notas = "" if lower_txt in ("no", "ninguna", "ninguno") else text
-                data_s["notas"] = notas
-
-                create_task(
-                    nombre=data_s["titulo"],
-                    fecha=data_s["fecha"],
-                    area=data_s["area"],
-                    estado="Pendiente",
-                    prioridad=data_s["prioridad"],
-                    contexto=data_s["contexto"],
-                    notas=data_s["notas"],
-                )
-                send_message(chat_id, f"✔ Tarea creada:\n*{data_s['titulo']}* ({data_s['area']}, prioridad {data_s['prioridad']})", reply_markup=MAIN_KEYBOARD)
-                del SESSIONS[chat_id]
-                return "OK"
-
-        # ---------- NUEVO PROYECTO ----------
-        if mode == "new_project":
-            if step == 1:
-                data_s["nombre"] = text
-                session["step"] = 2
-                send_message(chat_id, "Área del proyecto (ejemplo: Trabajo, Universidad, Personal). Usa el nombre tal cual lo tengas en Notion, por ejemplo `General`.", reply_markup=MAIN_KEYBOARD)
-                return "OK"
-            elif step == 2:
-                data_s["area"] = text if text else "General"
-                session["step"] = 3
-                send_message(chat_id, "Estado del proyecto (`Activo`, `Pausado`, `Completado`). Si dudas, `Activo`.", reply_markup=MAIN_KEYBOARD)
-                return "OK"
-            elif step == 3:
-                estado = text.capitalize() if text else "Activo"
-                if estado not in ("Activo", "Pausado", "Completado"):
-                    estado = "Activo"
-                data_s["estado"] = estado
-                session["step"] = 4
-                send_message(chat_id, "Fecha de inicio (`AAAA-MM-DD` o `hoy`).", reply_markup=MAIN_KEYBOARD)
-                return "OK"
-            elif step == 4:
-                if lower_txt == "hoy":
-                    fecha_inicio = hoy_iso()
-                else:
-                    try:
-                        datetime.date.fromisoformat(text)
-                        fecha_inicio = text
-                    except ValueError:
-                        send_message(chat_id, "No entendí la fecha. Usa `AAAA-MM-DD` o `hoy`.", reply_markup=MAIN_KEYBOARD)
-                        return "OK"
-                data_s["fecha_inicio"] = fecha_inicio
-                session["step"] = 5
-                send_message(chat_id, "Fecha objetivo de fin (`AAAA-MM-DD`) o escribe `ninguna` si aún no está definida.", reply_markup=MAIN_KEYBOARD)
-                return "OK"
-            elif step == 5:
-                if lower_txt in ("ninguna", "ninguno", "no"):
-                    fecha_fin = None
-                else:
-                    try:
-                        datetime.date.fromisoformat(text)
-                        fecha_fin = text
-                    except ValueError:
-                        send_message(chat_id, "No entendí la fecha. Usa `AAAA-MM-DD` o `ninguna`.", reply_markup=MAIN_KEYBOARD)
-                        return "OK"
-                data_s["fecha_fin"] = fecha_fin
-                session["step"] = 6
-                send_message(chat_id, "Impacto del proyecto (`Bajo`, `Medio`, `Alto`). Si dudas, `Medio`.", reply_markup=MAIN_KEYBOARD)
-                return "OK"
-            elif step == 6:
-                impacto = text.capitalize() if text else "Medio"
-                if impacto not in ("Bajo", "Medio", "Alto"):
-                    impacto = "Medio"
-                data_s["impacto"] = impacto
-                session["step"] = 7
-                send_message(chat_id, "Notas del proyecto (o escribe `no` si no quieres notas).", reply_markup=MAIN_KEYBOARD)
-                return "OK"
-            elif step == 7:
-                notas = "" if lower_txt in ("no", "ninguna", "ninguno") else text
-                data_s["notas"] = notas
-
-                create_project(
-                    nombre=data_s["nombre"],
-                    area=data_s["area"],
-                    estado=data_s["estado"],
-                    fecha_inicio=data_s["fecha_inicio"],
-                    fecha_fin=data_s["fecha_fin"],
-                    impacto=data_s["impacto"],
-                    notas=data_s["notas"],
-                )
-                send_message(chat_id, f"✔ Proyecto creado:\n*{data_s['nombre']}* ({data_s['area']}, impacto {data_s['impacto']})", reply_markup=MAIN_KEYBOARD)
-                del SESSIONS[chat_id]
-                return "OK"
-
-        # ---------- NUEVO HÁBITO ----------
-        if mode == "new_habit":
-            if step == 1:
-                data_s["nombre"] = text
-                session["step"] = 2
-                send_message(chat_id, "Área del hábito (ejemplo: Salud, Estudio, Finanzas, General).", reply_markup=MAIN_KEYBOARD)
-                return "OK"
-            elif step == 2:
-                data_s["area"] = text if text else "General"
-                session["step"] = 3
-                send_message(chat_id, "Número asociado al hábito (veces al día, pomodoros, etc.). Escribe un número entero, por ejemplo `1` o `3`.", reply_markup=MAIN_KEYBOARD)
-                return "OK"
-            elif step == 3:
-                try:
-                    numero = int(text)
-                except ValueError:
-                    numero = 1
-                data_s["numero"] = numero
-                session["step"] = 4
-                send_message(chat_id, "Notas del hábito (o escribe `no` si no quieres notas).", reply_markup=MAIN_KEYBOARD)
-                return "OK"
-            elif step == 4:
-                notas = "" if lower_txt in ("no", "ninguna", "ninguno") else text
-                data_s["notas"] = notas
-
-                create_habit(
-                    nombre=data_s["nombre"],
-                    area=data_s["area"],
-                    estado="Activo",
-                    numero=data_s["numero"],
-                    notas=data_s["notas"],
-                )
-                send_message(chat_id, f"✔ Hábito creado:\n*{data_s['nombre']}* ({data_s['area']}, número {data_s['numero']})", reply_markup=MAIN_KEYBOARD)
-                del SESSIONS[chat_id]
-                return "OK"
-
-        # ---------- NUEVO EVENTO ----------
-        if mode == "new_event":
-            if step == 1:
-                data_s["titulo"] = text
-                session["step"] = 2
-                send_message(chat_id, "Fecha del evento (`AAAA-MM-DD` o `hoy`).", reply_markup=MAIN_KEYBOARD)
-                return "OK"
-            elif step == 2:
-                if lower_txt == "hoy":
-                    fecha = hoy_iso()
-                else:
-                    try:
-                        datetime.date.fromisoformat(text)
-                        fecha = text
-                    except ValueError:
-                        send_message(chat_id, "No entendí la fecha. Usa `AAAA-MM-DD` o `hoy`.", reply_markup=MAIN_KEYBOARD)
-                        return "OK"
-                data_s["fecha"] = fecha
-                session["step"] = 3
-                send_message(chat_id, "Área del evento (ejemplo: Trabajo, Personal, Universidad, General).", reply_markup=MAIN_KEYBOARD)
-                return "OK"
-            elif step == 3:
-                data_s["area"] = text if text else "General"
-                session["step"] = 4
-                send_message(chat_id, "Tipo de evento (ejemplo: Reunión, Personal, Estudio, General).", reply_markup=MAIN_KEYBOARD)
-                return "OK"
-            elif step == 4:
-                data_s["tipo_evento"] = text if text else "General"
-                session["step"] = 5
-                send_message(chat_id, "Lugar del evento (o escribe `ninguno` si es en línea o no aplica).", reply_markup=MAIN_KEYBOARD)
-                return "OK"
-            elif step == 5:
-                lugar = "" if lower_txt in ("ninguno", "ninguna", "no") else text
-                data_s["lugar"] = lugar
-                session["step"] = 6
-                send_message(chat_id, "Notas del evento (o escribe `no` si no quieres notas).", reply_markup=MAIN_KEYBOARD)
-                return "OK"
-            elif step == 6:
-                notas = "" if lower_txt in ("no", "ninguna", "ninguno") else text
-                data_s["notas"] = notas
-
-                create_event(
-                    nombre=data_s["titulo"],
-                    fecha=data_s["fecha"],
-                    area=data_s["area"],
-                    tipo_evento=data_s["tipo_evento"],
-                    lugar=data_s["lugar"],
-                    notas=data_s["notas"],
-                )
-                send_message(chat_id, f"✔ Evento creado:\n*{data_s['titulo']}* el {data_s['fecha']} ({data_s['area']})", reply_markup=MAIN_KEYBOARD)
-                del SESSIONS[chat_id]
-                return "OK"
-
-    # =========================
-    #  INICIO DE SESIONES DESDE BOTONES
-    # =========================
-    if lower == "nueva tarea":
-        SESSIONS[chat_id] = {"mode": "new_task", "step": 1, "data": {}}
-        send_message(chat_id, "Escribe la descripción de la nueva tarea.", reply_markup=MAIN_KEYBOARD)
+    # Botones del menú principal
+    if lower.endswith("nuevo gasto"):
+        SESSIONS[chat_id] = {"tipo": "gasto", "paso": 1}
+        send_message(chat_id, "Vamos a registrar un *gasto*.\n\n¿Cuál es el monto del gasto?", reply_markup=CANCEL_KEYBOARD)
         return "OK"
 
-    if lower == "nuevo proyecto":
-        SESSIONS[chat_id] = {"mode": "new_project", "step": 1, "data": {}}
-        send_message(chat_id, "Escribe el nombre del nuevo proyecto.", reply_markup=MAIN_KEYBOARD)
+    if lower.endswith("nuevo ingreso"):
+        SESSIONS[chat_id] = {"tipo": "ingreso", "paso": 1}
+        send_message(chat_id, "Vamos a registrar un *ingreso*.\n\n¿Cuál es el monto del ingreso?", reply_markup=CANCEL_KEYBOARD)
         return "OK"
 
-    if lower in ("nuevo hábito", "nuevo habito"):
-        SESSIONS[chat_id] = {"mode": "new_habit", "step": 1, "data": {}}
-        send_message(chat_id, "Escribe el nombre del nuevo hábito.", reply_markup=MAIN_KEYBOARD)
+    if lower.endswith("nueva tarea"):
+        SESSIONS[chat_id] = {"tipo": "tarea", "paso": 1}
+        send_message(chat_id, "Vamos a crear una *tarea*.\n\nEscribe el título de la tarea.", reply_markup=CANCEL_KEYBOARD)
         return "OK"
 
-    if lower == "nuevo evento":
-        SESSIONS[chat_id] = {"mode": "new_event", "step": 1, "data": {}}
-        send_message(chat_id, "Dime el título del evento (por ejemplo: reunión con gerencia).", reply_markup=MAIN_KEYBOARD)
+    if lower.endswith("nuevo evento"):
+        SESSIONS[chat_id] = {"tipo": "evento", "paso": 1}
+        send_message(chat_id, "Vamos a crear un *evento*.\n\nEscribe el nombre del evento.", reply_markup=CANCEL_KEYBOARD)
         return "OK"
 
-    if lower in ("resumen finanzas", "resumen de gastos e ingresos"):
-        send_message(chat_id, resumen_finanzas_mes(), reply_markup=MAIN_KEYBOARD)
+    if lower.endswith("nuevo proyecto"):
+        SESSIONS[chat_id] = {"tipo": "proyecto", "paso": 1}
+        send_message(chat_id, "Vamos a crear un *proyecto*.\n\nEscribe el nombre del proyecto.", reply_markup=CANCEL_KEYBOARD)
         return "OK"
 
-    if lower == "resumen general":
-        send_message(chat_id, resumen_general(), reply_markup=MAIN_KEYBOARD)
+    if lower.endswith("nuevo hábito") or lower.endswith("nuevo habito"):
+        SESSIONS[chat_id] = {"tipo": "habito", "paso": 1}
+        send_message(chat_id, "Vamos a crear un *hábito*.\n\nEscribe el nombre del hábito.", reply_markup=CANCEL_KEYBOARD)
         return "OK"
 
-    # =========================
-    #  COMANDOS TIPO TEXTO
-    # =========================
+    if lower.endswith("resumen finanzas"):
+        send_message(chat_id, resumen_finanzas_mes())
+        return "OK"
+
+    if lower.endswith("resumen general"):
+        send_message(chat_id, snapshot_contexto())
+        return "OK"
+
+    # Comandos de texto tipo "gasto: 150 tacos"
     manejado = (
         manejar_comando_finanzas(lower, chat_id)
         or manejar_comando_tareas(lower, chat_id)
@@ -1119,9 +1057,7 @@ def webhook():
     if manejado:
         return "OK"
 
-    # =========================
-    #  IA POR DEFECTO
-    # =========================
+    # IA por defecto
     respuesta_ia = consultar_ia(text)
     send_message(chat_id, respuesta_ia, reply_to=message_id, reply_markup=MAIN_KEYBOARD)
 
