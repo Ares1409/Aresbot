@@ -21,7 +21,9 @@ NOTION_DB_EVENTOS = os.getenv("NOTION_DB_EVENTOS")
 NOTION_DB_PROYECTOS = os.getenv("NOTION_DB_PROYECTOS")
 NOTION_DB_HABITOS = os.getenv("NOTION_DB_HABITOS")
 
-TELEGRAM_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+TELEGRAM_URL_SEND = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+TELEGRAM_URL_FILE = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile"
+
 NOTION_BASE_URL = "https://api.notion.com/v1"
 NOTION_VERSION = "2022-06-28"
 
@@ -46,16 +48,23 @@ def send_message(chat_id, text, reply_to=None):
     if reply_to:
         payload["reply_to_message_id"] = reply_to
     try:
-        requests.post(TELEGRAM_URL, json=payload, timeout=15)
+        requests.post(TELEGRAM_URL_SEND, json=payload, timeout=15)
     except Exception as e:
         print("Error enviando mensaje a Telegram:", e)
 
 
 def notion_create_page(database_id, properties):
+    """
+    Crea página en Notion y devuelve (ok, mensaje).
+    ok = True si se creó, False si hubo error.
+    """
     if not database_id:
-        print("ERROR: database_id vacío al crear página en Notion.")
-        return None
+        msg = "ERROR: database_id vacío al crear página en Notion."
+        print(msg)
+        return False, msg
+
     data = {"parent": {"database_id": database_id}, "properties": properties}
+
     try:
         r = requests.post(
             f"{NOTION_BASE_URL}/pages",
@@ -64,11 +73,14 @@ def notion_create_page(database_id, properties):
             timeout=20,
         )
         if r.status_code >= 300:
-            print("Error creando página en Notion:", r.status_code, r.text)
-        return r
+            msg = f"Error creando página en Notion: {r.status_code} {r.text}"
+            print(msg)
+            return False, msg
+        return True, "OK"
     except Exception as e:
-        print("Error de red creando página en Notion:", e)
-        return None
+        msg = f"Error de red creando página en Notion: {e}"
+        print(msg)
+        return False, msg
 
 
 def notion_query(database_id, body):
@@ -104,7 +116,6 @@ def inicio_fin_mes_actual():
         fin = hoy.replace(month=hoy.month + 1, day=1) - datetime.timedelta(days=1)
     return inicio.isoformat(), fin.isoformat()
 
-
 # =========================
 #  CREACIÓN DE REGISTROS
 # =========================
@@ -121,7 +132,7 @@ def create_financial_record(movimiento, tipo, monto, categoria="General",
         "Área": {"select": {"name": area}},
         "Fecha": {"date": {"start": fecha}},
     }
-    notion_create_page(NOTION_DB_FINANZAS, properties)
+    return notion_create_page(NOTION_DB_FINANZAS, properties)
 
 
 def create_task(nombre, fecha=None, area="General", estado="Pendiente",
@@ -138,7 +149,7 @@ def create_task(nombre, fecha=None, area="General", estado="Pendiente",
     }
     if notas:
         properties["Notas"] = {"rich_text": [{"text": {"content": notas[:1800]}}]}
-    notion_create_page(NOTION_DB_TAREAS, properties)
+    return notion_create_page(NOTION_DB_TAREAS, properties)
 
 
 def create_event(nombre, fecha, area="General", tipo_evento="General",
@@ -153,7 +164,7 @@ def create_event(nombre, fecha, area="General", tipo_evento="General",
         properties["Lugar"] = {"rich_text": [{"text": {"content": lugar[:500]}}]}
     if notas:
         properties["Notas"] = {"rich_text": [{"text": {"content": notas[:1800]}}]}
-    notion_create_page(NOTION_DB_EVENTOS, properties)
+    return notion_create_page(NOTION_DB_EVENTOS, properties)
 
 
 def create_project(nombre, area="General", estado="Activo",
@@ -172,7 +183,7 @@ def create_project(nombre, area="General", estado="Activo",
         properties["Fecha objetivo fin"] = {"date": {"start": fecha_fin}}
     if notas:
         properties["Notas"] = {"rich_text": [{"text": {"content": notas[:1800]}}]}
-    notion_create_page(NOTION_DB_PROYECTOS, properties)
+    return notion_create_page(NOTION_DB_PROYECTOS, properties)
 
 
 def create_habit(nombre, area="General", estado="Activo",
@@ -185,8 +196,7 @@ def create_habit(nombre, area="General", estado="Activo",
     }
     if notas:
         properties["Notas"] = {"rich_text": [{"text": {"content": notas[:1800]}}]}
-    notion_create_page(NOTION_DB_HABITOS, properties)
-
+    return notion_create_page(NOTION_DB_HABITOS, properties)
 
 # =========================
 #  CONSULTAS E INFORMES
@@ -355,7 +365,6 @@ def snapshot_contexto():
     )
     return contexto
 
-
 # =========================
 #  IA – PERSONALIDAD ARES
 # =========================
@@ -363,24 +372,13 @@ def snapshot_contexto():
 def consultar_ia(mensaje_usuario):
     contexto = snapshot_contexto()
     prompt = (
-        "Eres *Ares*, una asistente personal femenina, profesional, amable,sexy y se muy breve no de sugerencias en que puedes ayudar, limitate a responder lo que pido no preguntes si no lo pido"
-        "organizada y muy eficiente. Hablas SIEMPRE en español. Tu tono es de "
-        "secretaria ejecutiva personal: educada, clara, respetuosa y cercana, "
-        "con un estilo cálido pero profesional.\n\n"
-        "Tu objetivo es ayudar a Manuel a gestionar sus finanzas, tareas, "
-        "eventos, proyectos y hábitos, usando la información disponible del "
-        "sistema (Notion). Cuando sea útil, haz referencia explícita a los "
-        "números y datos del resumen (ingresos, gastos, tareas, eventos, etc.), "
-        "pero responde en texto natural, no solo listas.\n\n"
-        "Eres sumisa, muy servicial y diligente. Evitas repetir y responder muy largo "
-        "la misma explicación varias veces y vas al punto.\n\n"
-        "A continuación tienes un resumen reciente del sistema:\n\n"
+        "Eres *Ares*, una asistente personal femenina, profesional, amable y muy breve. "
+        "No digas en qué puedes ayudar, limítate a responder exactamente lo que Manuel pide. "
+        "Hablas SIEMPRE en español, con tono de secretaria ejecutiva: clara, directa y cordial.\n\n"
+        "Tu objetivo es ayudar a Manuel a gestionar finanzas, tareas, eventos, proyectos y hábitos "
+        "usando los datos del sistema.\n\n"
+        "Resumen del sistema:\n"
         f"{contexto}\n\n"
-        "Con base en esos datos, responde a la pregunta o petición de Manuel. "
-        "Si te pide que planifiques el día o la semana, usa sus tareas y "
-        "eventos. Si te pide análisis financiero, apóyate en el resumen del mes "
-        "y en los últimos movimientos. Si te pide algo que requiera más datos, "
-        "pregunta solo lo mínimo necesario.\n\n"
         f"Mensaje de Manuel: {mensaje_usuario}\n\n"
         "Respuesta de Ares:"
     )
@@ -389,12 +387,10 @@ def consultar_ia(mensaje_usuario):
             model="gpt-4.1-mini",
             input=prompt,
         )
-        # API Responses nueva
         try:
             return completion.output[0].content[0].text
         except Exception:
             pass
-        # Propiedad de conveniencia
         try:
             return completion.output_text
         except Exception:
@@ -407,6 +403,146 @@ def consultar_ia(mensaje_usuario):
             "Revisa tu cuota de OpenAI o vuelve a intentarlo más tarde."
         )
 
+# =========================
+#  OCR DESDE FOTO
+# =========================
+
+def procesar_foto_y_registrar(chat_id, message, reply_to=None):
+    """
+    1) Descarga la foto de Telegram
+    2) Llama a OpenAI visión para extraer info estructurada
+    3) Crea finanzas / tareas / eventos / hábitos según el JSON devuelto
+    """
+    photos = message.get("photo", [])
+    if not photos:
+        send_message(chat_id, "No encontré la imagen, inténtalo de nuevo.", reply_to)
+        return
+
+    # Usamos la foto de mayor resolución (último elemento)
+    file_id = photos[-1]["file_id"]
+
+    # 1. Obtener file_path desde Telegram
+    try:
+        r = requests.get(TELEGRAM_URL_FILE, params={"file_id": file_id}, timeout=15)
+        data = r.json()
+        file_path = data["result"]["file_path"]
+        file_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
+    except Exception as e:
+        print("Error obteniendo file_path de Telegram:", e)
+        send_message(chat_id, "No pude descargar la imagen desde Telegram.", reply_to)
+        return
+
+    # 2. Llamar a OpenAI visión para que devuelva JSON
+    system_prompt = (
+        "Eres un asistente que lee notas manuscritas, listas y apuntes desde una imagen "
+        "y las convierte en datos estructurados.\n\n"
+        "Devuelve SIEMPRE un JSON válido con esta estructura EXACTA:\n\n"
+        "{\n"
+        '  "finanzas": [ {"tipo": "Ingreso|Egreso", "monto": 0, "descripcion": "", "fecha": "YYYY-MM-DD" (opcional)} ],\n'
+        '  "tareas":   [ {"nombre": "", "fecha": "YYYY-MM-DD" (opcional)} ],\n'
+        '  "eventos":  [ {"nombre": "", "fecha": "YYYY-MM-DD" (opcional)} ],\n'
+        '  "habitos":  [ {"nombre": ""} ]\n'
+        "}\n\n"
+        "Si algún campo no existe en la imagen, deja la lista vacía para esa categoría.\n"
+        "NO añadas texto fuera del JSON."
+    )
+
+    try:
+        resp = client.responses.create(
+            model="gpt-4.1-mini",
+            input=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": system_prompt},
+                        {"type": "input_image", "image_url": file_url},
+                    ],
+                }
+            ],
+        )
+        try:
+            raw_text = resp.output[0].content[0].text
+        except Exception:
+            raw_text = resp.output_text
+    except Exception as e:
+        print("Error llamando a OpenAI visión:", e)
+        send_message(chat_id, "No pude analizar la imagen con la IA.", reply_to)
+        return
+
+    # 3. Parsear JSON
+    try:
+        data = json.loads(raw_text.strip())
+    except Exception as e:
+        print("Error parseando JSON de OCR:", e, raw_text)
+        send_message(chat_id, "La IA no devolvió un formato entendible.", reply_to)
+        return
+
+    finanzas = data.get("finanzas", []) or []
+    tareas = data.get("tareas", []) or []
+    eventos = data.get("eventos", []) or []
+    habitos = data.get("habitos", []) or []
+
+    n_fin = n_tar = n_eve = n_hab = 0
+
+    # Registrar finanzas
+    for f in finanzas:
+        try:
+            tipo = f.get("tipo", "").strip().capitalize()
+            monto = float(f.get("monto", 0))
+            desc = f.get("descripcion", "Sin descripción")
+            fecha = f.get("fecha") or hoy_iso()
+            ok, _ = create_financial_record(desc, tipo, monto, fecha=fecha)
+            if ok:
+                n_fin += 1
+        except Exception as e:
+            print("Error registrando finanza desde OCR:", e)
+
+    # Registrar tareas
+    for t in tareas:
+        try:
+            nombre = t.get("nombre", "").strip()
+            if not nombre:
+                continue
+            fecha = t.get("fecha") or hoy_iso()
+            ok, _ = create_task(nombre, fecha=fecha)
+            if ok:
+                n_tar += 1
+        except Exception as e:
+            print("Error registrando tarea desde OCR:", e)
+
+    # Registrar eventos
+    for ev in eventos:
+        try:
+            nombre = ev.get("nombre", "").strip()
+            if not nombre:
+                continue
+            fecha = ev.get("fecha") or hoy_iso()
+            ok, _ = create_event(nombre, fecha=fecha)
+            if ok:
+                n_eve += 1
+        except Exception as e:
+            print("Error registrando evento desde OCR:", e)
+
+    # Registrar hábitos
+    for h in habitos:
+        try:
+            nombre = h.get("nombre", "").strip()
+            if not nombre:
+                continue
+            ok, _ = create_habit(nombre)
+            if ok:
+                n_hab += 1
+        except Exception as e:
+            print("Error registrando hábito desde OCR:", e)
+
+    resumen = (
+        f"De la imagen registré:\n"
+        f"• Finanzas: {n_fin}\n"
+        f"• Tareas: {n_tar}\n"
+        f"• Eventos: {n_eve}\n"
+        f"• Hábitos: {n_hab}"
+    )
+    send_message(chat_id, resumen, reply_to)
 
 # =========================
 #  PARSEO DE COMANDOS
@@ -423,12 +559,13 @@ HELP_TEXT = (
     "*Consultas rápidas*\n"
     "• `estado finanzas`\n"
     "• `ingresos este mes` o `ingresos`\n"
-    "• `gastos este mes`\n"
+    "• `gastos este mes` o `gastos`\n"
     "• `tareas hoy`\n"
     "• `eventos hoy`\n"
     "• `proyectos activos`\n"
     "• `hábitos activos`\n\n"
-    "Si escribes algo más libre, Ares usará la IA para ayudarte."
+    "También puedes enviar una *foto de tus apuntes* y Ares intentará convertirlos "
+    "en finanzas, tareas, eventos y hábitos."
 )
 
 
@@ -446,8 +583,13 @@ def manejar_comando_finanzas(texto, chat_id):
         except ValueError:
             send_message(chat_id, "No entendí el monto. Usa algo como: `gasto: 150 tacos`")
             return True
-        create_financial_record(movimiento=descripcion, tipo="Egreso", monto=monto_num)
-        send_message(chat_id, f"✔ Gasto registrado: {monto_num} – {descripcion}")
+        ok, msg = create_financial_record(
+            movimiento=descripcion, tipo="Egreso", monto=monto_num
+        )
+        if ok:
+            send_message(chat_id, f"✔ Gasto registrado: {monto_num} – {descripcion}")
+        else:
+            send_message(chat_id, "No pude guardar el gasto en Notion.\n" + msg)
         return True
 
     if texto.startswith("ingreso:"):
@@ -463,8 +605,13 @@ def manejar_comando_finanzas(texto, chat_id):
         except ValueError:
             send_message(chat_id, "No entendí el monto. Usa algo como: `ingreso: 9000 sueldo`")
             return True
-        create_financial_record(movimiento=descripcion, tipo="Ingreso", monto=monto_num)
-        send_message(chat_id, f"✔ Ingreso registrado: {monto_num} – {descripcion}")
+        ok, msg = create_financial_record(
+            movimiento=descripcion, tipo="Ingreso", monto=monto_num
+        )
+        if ok:
+            send_message(chat_id, f"✔ Ingreso registrado: {monto_num} – {descripcion}")
+        else:
+            send_message(chat_id, "No pude guardar el ingreso en Notion.\n" + msg)
         return True
 
     if "estado finanzas" in texto or "balance este mes" in texto:
@@ -488,8 +635,11 @@ def manejar_comando_tareas(texto, chat_id):
         if not descripcion:
             send_message(chat_id, "Formato: `tarea: descripción de la tarea`")
             return True
-        create_task(descripcion)
-        send_message(chat_id, f"✔ Tarea creada: {descripcion}")
+        ok, msg = create_task(descripcion)
+        if ok:
+            send_message(chat_id, f"✔ Tarea creada: {descripcion}")
+        else:
+            send_message(chat_id, "No pude guardar la tarea en Notion.\n" + msg)
         return True
 
     if "tareas hoy" in texto or "tareas atrasadas" in texto:
@@ -505,8 +655,11 @@ def manejar_comando_eventos(texto, chat_id):
         if not descripcion:
             send_message(chat_id, "Formato rápido: `evento: junta kaizen viernes 16:00`")
             return True
-        create_event(descripcion, fecha=hoy_iso())
-        send_message(chat_id, f"✔ Evento creado (hoy): {descripcion}")
+        ok, msg = create_event(descripcion, fecha=hoy_iso())
+        if ok:
+            send_message(chat_id, f"✔ Evento creado (hoy): {descripcion}")
+        else:
+            send_message(chat_id, "No pude guardar el evento en Notion.\n" + msg)
         return True
 
     if "eventos hoy" in texto or "agenda" in texto:
@@ -522,8 +675,11 @@ def manejar_comando_proyectos(texto, chat_id):
         if not nombre:
             send_message(chat_id, "Formato: `proyecto: nombre del proyecto`")
             return True
-        create_project(nombre)
-        send_message(chat_id, f"✔ Proyecto creado: {nombre}")
+        ok, msg = create_project(nombre)
+        if ok:
+            send_message(chat_id, f"✔ Proyecto creado: {nombre}")
+        else:
+            send_message(chat_id, "No pude guardar el proyecto en Notion.\n" + msg)
         return True
 
     if "proyectos activos" in texto:
@@ -539,8 +695,11 @@ def manejar_comando_habitos(texto, chat_id):
         if not nombre:
             send_message(chat_id, "Formato: `hábito: descripción del hábito`")
             return True
-        create_habit(nombre)
-        send_message(chat_id, f"✔ Hábito creado: {nombre}")
+        ok, msg = create_habit(nombre)
+        if ok:
+            send_message(chat_id, f"✔ Hábito creado: {nombre}")
+        else:
+            send_message(chat_id, "No pude guardar el hábito en Notion.\n" + msg)
         return True
 
     if "hábitos activos" in texto or "habitos activos" in texto:
@@ -548,7 +707,6 @@ def manejar_comando_habitos(texto, chat_id):
         return True
 
     return False
-
 
 # =========================
 #  WEBHOOK TELEGRAM
@@ -570,10 +728,16 @@ def webhook():
 
     chat_id = message["chat"]["id"]
     message_id = message.get("message_id")
-    text = (message.get("text") or "").strip()
 
+    # 1) Si trae foto, la procesamos con OCR
+    if "photo" in message and message["photo"]:
+        procesar_foto_y_registrar(chat_id, message, reply_to=message_id)
+        return "OK"
+
+    # 2) Solo texto
+    text = (message.get("text") or "").strip()
     if not text:
-        send_message(chat_id, "Solo entiendo mensajes de texto por ahora. 🙂")
+        send_message(chat_id, "Solo entiendo mensajes de texto o fotos por ahora. 🙂")
         return "OK"
 
     lower = text.lower().strip()
@@ -595,9 +759,9 @@ def webhook():
 
     respuesta_ia = consultar_ia(text)
     send_message(chat_id, respuesta_ia, reply_to=message_id)
-
     return "OK"
 
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
+
