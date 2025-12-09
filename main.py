@@ -1,4 +1,4 @@
-import os
+import os 
 import json
 import requests
 import datetime
@@ -21,8 +21,9 @@ NOTION_DB_EVENTOS = os.getenv("NOTION_DB_EVENTOS")
 NOTION_DB_PROYECTOS = os.getenv("NOTION_DB_PROYECTOS")
 NOTION_DB_HABITOS = os.getenv("NOTION_DB_HABITOS")
 
-TELEGRAM_URL_SEND = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-TELEGRAM_URL_FILE = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile"
+TELEGRAM_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+TELEGRAM_FILE_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile"
+TELEGRAM_FILE_BASE = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/"
 
 NOTION_BASE_URL = "https://api.notion.com/v1"
 NOTION_VERSION = "2022-06-28"
@@ -48,23 +49,16 @@ def send_message(chat_id, text, reply_to=None):
     if reply_to:
         payload["reply_to_message_id"] = reply_to
     try:
-        requests.post(TELEGRAM_URL_SEND, json=payload, timeout=15)
+        requests.post(TELEGRAM_URL, json=payload, timeout=15)
     except Exception as e:
         print("Error enviando mensaje a Telegram:", e)
 
 
 def notion_create_page(database_id, properties):
-    """
-    Crea página en Notion y devuelve (ok, mensaje).
-    ok = True si se creó, False si hubo error.
-    """
     if not database_id:
-        msg = "ERROR: database_id vacío al crear página en Notion."
-        print(msg)
-        return False, msg
-
+        print("ERROR: database_id vacío al crear página en Notion.")
+        return None
     data = {"parent": {"database_id": database_id}, "properties": properties}
-
     try:
         r = requests.post(
             f"{NOTION_BASE_URL}/pages",
@@ -73,14 +67,11 @@ def notion_create_page(database_id, properties):
             timeout=20,
         )
         if r.status_code >= 300:
-            msg = f"Error creando página en Notion: {r.status_code} {r.text}"
-            print(msg)
-            return False, msg
-        return True, "OK"
+            print("Error creando página en Notion:", r.status_code, r.text)
+        return r
     except Exception as e:
-        msg = f"Error de red creando página en Notion: {e}"
-        print(msg)
-        return False, msg
+        print("Error de red creando página en Notion:", e)
+        return None
 
 
 def notion_query(database_id, body):
@@ -129,10 +120,10 @@ def create_financial_record(movimiento, tipo, monto, categoria="General",
         "Tipo": {"select": {"name": tipo}},
         "Monto": {"number": float(monto)},
         "Categoría": {"select": {"name": categoria}},
-        "Área": {"select": {"name": area}},
+        "Area": {"select": {"name": area}},   # columna "Area" en Notion
         "Fecha": {"date": {"start": fecha}},
     }
-    return notion_create_page(NOTION_DB_FINANZAS, properties)
+    notion_create_page(NOTION_DB_FINANZAS, properties)
 
 
 def create_task(nombre, fecha=None, area="General", estado="Pendiente",
@@ -142,14 +133,14 @@ def create_task(nombre, fecha=None, area="General", estado="Pendiente",
     properties = {
         "Tarea": {"title": [{"text": {"content": nombre}}]},
         "Estado": {"select": {"name": estado}},
-        "Área": {"select": {"name": area}},
+        "Area": {"select": {"name": area}},
         "Fecha": {"date": {"start": fecha}},
         "Prioridad": {"select": {"name": prioridad}},
         "Contexto": {"select": {"name": contexto}},
     }
     if notas:
         properties["Notas"] = {"rich_text": [{"text": {"content": notas[:1800]}}]}
-    return notion_create_page(NOTION_DB_TAREAS, properties)
+    notion_create_page(NOTION_DB_TAREAS, properties)
 
 
 def create_event(nombre, fecha, area="General", tipo_evento="General",
@@ -157,14 +148,14 @@ def create_event(nombre, fecha, area="General", tipo_evento="General",
     properties = {
         "Evento": {"title": [{"text": {"content": nombre}}]},
         "Fecha": {"date": {"start": fecha}},
-        "Área": {"select": {"name": area}},
+        "Area": {"select": {"name": area}},
         "Tipo de Evento": {"select": {"name": tipo_evento}},
     }
     if lugar:
         properties["Lugar"] = {"rich_text": [{"text": {"content": lugar[:500]}}]}
     if notas:
         properties["Notas"] = {"rich_text": [{"text": {"content": notas[:1800]}}]}
-    return notion_create_page(NOTION_DB_EVENTOS, properties)
+    notion_create_page(NOTION_DB_EVENTOS, properties)
 
 
 def create_project(nombre, area="General", estado="Activo",
@@ -174,7 +165,7 @@ def create_project(nombre, area="General", estado="Activo",
         fecha_inicio = hoy_iso()
     properties = {
         "Proyecto": {"title": [{"text": {"content": nombre}}]},
-        "Área": {"select": {"name": area}},
+        "Area": {"select": {"name": area}},
         "Estado": {"select": {"name": estado}},
         "Fecha Inicio": {"date": {"start": fecha_inicio}},
         "Impacto": {"select": {"name": impacto}},
@@ -183,20 +174,20 @@ def create_project(nombre, area="General", estado="Activo",
         properties["Fecha objetivo fin"] = {"date": {"start": fecha_fin}}
     if notas:
         properties["Notas"] = {"rich_text": [{"text": {"content": notas[:1800]}}]}
-    return notion_create_page(NOTION_DB_PROYECTOS, properties)
+    notion_create_page(NOTION_DB_PROYECTOS, properties)
 
 
 def create_habit(nombre, area="General", estado="Activo",
                  numero=1, notas=""):
     properties = {
         "Hábito": {"title": [{"text": {"content": nombre}}]},
-        "Área": {"select": {"name": area}},
+        "Area": {"select": {"name": area}},
         "Estado": {"select": {"name": estado}},
         "Número": {"number": int(numero)},
     }
     if notas:
         properties["Notas"] = {"rich_text": [{"text": {"content": notas[:1800]}}]}
-    return notion_create_page(NOTION_DB_HABITOS, properties)
+    notion_create_page(NOTION_DB_HABITOS, properties)
 
 # =========================
 #  CONSULTAS E INFORMES
@@ -306,7 +297,7 @@ def listar_proyectos_activos(limit=10):
         props = page.get("properties", {})
         titulo = props.get("Proyecto", {}).get("title", [])
         nombre = titulo[0]["plain_text"] if titulo else "Proyecto sin nombre"
-        area = (props.get("Área", {}).get("select", {}) or {}).get("name", "")
+        area = (props.get("Area", {}).get("select", {}) or {}).get("name", "")
         impacto = (props.get("Impacto", {}).get("select", {}) or {}).get("name", "")
         lineas.append(f"- {nombre} ({area}, impacto {impacto})")
     return "\n".join(lineas)
@@ -372,13 +363,20 @@ def snapshot_contexto():
 def consultar_ia(mensaje_usuario):
     contexto = snapshot_contexto()
     prompt = (
-        "Eres *Ares*, una asistente personal femenina, profesional, amable y muy breve. "
-        "No digas en qué puedes ayudar, limítate a responder exactamente lo que Manuel pide. "
-        "Hablas SIEMPRE en español, con tono de secretaria ejecutiva: clara, directa y cordial.\n\n"
-        "Tu objetivo es ayudar a Manuel a gestionar finanzas, tareas, eventos, proyectos y hábitos "
-        "usando los datos del sistema.\n\n"
-        "Resumen del sistema:\n"
+        "Eres *Ares*, una asistente personal femenina, profesional, amable, organizada y muy eficiente. "
+        "Hablas SIEMPRE en español. Tu tono es de secretaria ejecutiva personal: educada, clara, respetuosa y cercana, "
+        "con un estilo cálido pero profesional. No des discursos largos, ve al punto.\n\n"
+        "Tu objetivo es ayudar a Manuel a gestionar sus finanzas, tareas, eventos, proyectos y hábitos, "
+        "usando la información disponible del sistema (Notion). Cuando sea útil, haz referencia explícita "
+        "a los números y datos del resumen (ingresos, gastos, tareas, eventos, etc.), pero responde en texto natural.\n\n"
+        "Evita repetir la misma explicación y no ofrezcas listas de cosas en las que puedes ayudar; "
+        "limítate a responder a lo que Manuel pida.\n\n"
+        "A continuación tienes un resumen reciente del sistema:\n\n"
         f"{contexto}\n\n"
+        "Con base en esos datos, responde a la pregunta o petición de Manuel. "
+        "Si te pide que planifiques el día o la semana, usa sus tareas y eventos. "
+        "Si te pide análisis financiero, apóyate en el resumen del mes y en los últimos movimientos. "
+        "Si necesitas más datos, pregunta solo lo mínimo necesario.\n\n"
         f"Mensaje de Manuel: {mensaje_usuario}\n\n"
         "Respuesta de Ares:"
     )
@@ -387,15 +385,19 @@ def consultar_ia(mensaje_usuario):
             model="gpt-4.1-mini",
             input=prompt,
         )
+        text = ""
         try:
-            return completion.output[0].content[0].text
+            text = completion.output[0].content[0].text
         except Exception:
             pass
-        try:
-            return completion.output_text
-        except Exception:
-            pass
-        return "Lo siento Manuel, hubo un problema interpretando la respuesta de la IA."
+        if not text:
+            try:
+                text = completion.output_text
+            except Exception:
+                text = ""
+        if not text:
+            text = "Lo siento Manuel, hubo un problema interpretando la respuesta de la IA."
+        return text
     except Exception as e:
         print("Error llamando a OpenAI:", e)
         return (
@@ -404,47 +406,51 @@ def consultar_ia(mensaje_usuario):
         )
 
 # =========================
-#  OCR DESDE FOTO
+#  IMÁGENES: FOTO → OCR → NOTION
 # =========================
 
-def procesar_foto_y_registrar(chat_id, message, reply_to=None):
-    """
-    1) Descarga la foto de Telegram
-    2) Llama a OpenAI visión para extraer info estructurada
-    3) Crea finanzas / tareas / eventos / hábitos según el JSON devuelto
-    """
-    photos = message.get("photo", [])
-    if not photos:
-        send_message(chat_id, "No encontré la imagen, inténtalo de nuevo.", reply_to)
-        return
-
-    # Usamos la foto de mayor resolución (último elemento)
-    file_id = photos[-1]["file_id"]
-
-    # 1. Obtener file_path desde Telegram
+def get_telegram_file_url(file_id):
     try:
-        r = requests.get(TELEGRAM_URL_FILE, params={"file_id": file_id}, timeout=15)
+        r = requests.get(TELEGRAM_FILE_URL, params={"file_id": file_id}, timeout=15)
         data = r.json()
+        if not data.get("ok"):
+            print("Error getFile Telegram:", data)
+            return None
         file_path = data["result"]["file_path"]
-        file_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
+        return TELEGRAM_FILE_BASE + file_path
     except Exception as e:
-        print("Error obteniendo file_path de Telegram:", e)
-        send_message(chat_id, "No pude descargar la imagen desde Telegram.", reply_to)
-        return
+        print("Error obteniendo archivo de Telegram:", e)
+        return None
 
-    # 2. Llamar a OpenAI visión para que devuelva JSON
+
+def procesar_imagen_notas(image_url):
     system_prompt = (
-        "Eres un asistente que lee notas manuscritas, listas y apuntes desde una imagen "
-        "y las convierte en datos estructurados.\n\n"
-        "Devuelve SIEMPRE un JSON válido con esta estructura EXACTA:\n\n"
+        "Eres una asistente que lee apuntes escritos en una imagen y los convierte "
+        "en información estructurada para finanzas, tareas, eventos, proyectos y hábitos.\n\n"
+        "Devuelve SIEMPRE un JSON válido con exactamente esta estructura:\n\n"
         "{\n"
-        '  "finanzas": [ {"tipo": "Ingreso|Egreso", "monto": 0, "descripcion": "", "fecha": "YYYY-MM-DD" (opcional)} ],\n'
-        '  "tareas":   [ {"nombre": "", "fecha": "YYYY-MM-DD" (opcional)} ],\n'
-        '  "eventos":  [ {"nombre": "", "fecha": "YYYY-MM-DD" (opcional)} ],\n'
-        '  "habitos":  [ {"nombre": ""} ]\n'
+        '  "finanzas": [\n'
+        '    {"tipo": "Ingreso" o "Egreso", "monto": número, "descripcion": "texto"}\n'
+        "  ],\n"
+        '  "tareas": [\n'
+        '    {"titulo": "texto de la tarea", "fecha": "YYYY-MM-DD" o null}\n'
+        "  ],\n"
+        '  "eventos": [\n'
+        '    {"titulo": "texto del evento", "fecha": "YYYY-MM-DD" o null, "lugar": "texto o null"}\n'
+        "  ],\n"
+        '  "proyectos": [\n'
+        '    {"nombre": "nombre del proyecto"}\n'
+        "  ],\n"
+        '  "habitos": [\n'
+        '    {"nombre": "nombre del hábito"}\n'
+        "  ]\n"
         "}\n\n"
-        "Si algún campo no existe en la imagen, deja la lista vacía para esa categoría.\n"
-        "NO añadas texto fuera del JSON."
+        "Si algún apartado no aparece en los apuntes, devuélvelo como lista vacía."
+    )
+
+    user_prompt = (
+        "Lee cuidadosamente los apuntes de la imagen y extrae cualquier gasto, ingreso, "
+        "tarea, evento, proyecto o hábito que encuentres. No expliques nada, solo regresa el JSON."
     )
 
     try:
@@ -452,97 +458,75 @@ def procesar_foto_y_registrar(chat_id, message, reply_to=None):
             model="gpt-4.1-mini",
             input=[
                 {
+                    "role": "system",
+                    "content": [{"type": "input_text", "text": system_prompt}],
+                },
+                {
                     "role": "user",
                     "content": [
-                        {"type": "input_text", "text": system_prompt},
-                        {"type": "input_image", "image_url": file_url},
+                        {"type": "input_text", "text": user_prompt},
+                        {"type": "input_image", "image_url": {"url": image_url}},
                     ],
-                }
+                },
             ],
         )
+
+        text = ""
         try:
-            raw_text = resp.output[0].content[0].text
+            text = resp.output[0].content[0].text
         except Exception:
-            raw_text = resp.output_text
+            pass
+        if not text:
+            try:
+                text = resp.output_text
+            except Exception:
+                text = ""
+        text = text.strip()
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1:
+            text = text[start : end + 1]
+        data = json.loads(text)
+        return data
     except Exception as e:
-        print("Error llamando a OpenAI visión:", e)
-        send_message(chat_id, "No pude analizar la imagen con la IA.", reply_to)
-        return
+        print("Error procesando imagen con OpenAI:", e)
+        return {}
 
-    # 3. Parsear JSON
-    try:
-        data = json.loads(raw_text.strip())
-    except Exception as e:
-        print("Error parseando JSON de OCR:", e, raw_text)
-        send_message(chat_id, "La IA no devolvió un formato entendible.", reply_to)
-        return
 
-    finanzas = data.get("finanzas", []) or []
-    tareas = data.get("tareas", []) or []
-    eventos = data.get("eventos", []) or []
-    habitos = data.get("habitos", []) or []
-
-    n_fin = n_tar = n_eve = n_hab = 0
-
-    # Registrar finanzas
-    for f in finanzas:
+def guardar_notas_estructuradas(desde_imagen):
+    # Finanzas
+    for mov in desde_imagen.get("finanzas", []):
         try:
-            tipo = f.get("tipo", "").strip().capitalize()
-            monto = float(f.get("monto", 0))
-            desc = f.get("descripcion", "Sin descripción")
-            fecha = f.get("fecha") or hoy_iso()
-            ok, _ = create_financial_record(desc, tipo, monto, fecha=fecha)
-            if ok:
-                n_fin += 1
+            tipo = mov.get("tipo", "Egreso")
+            monto = float(mov.get("monto", 0))
+            desc = mov.get("descripcion") or "Sin descripción"
+            if monto != 0:
+                create_financial_record(desc, tipo=tipo, monto=monto)
         except Exception as e:
-            print("Error registrando finanza desde OCR:", e)
+            print("Error guardando movimiento desde imagen:", e)
 
-    # Registrar tareas
-    for t in tareas:
-        try:
-            nombre = t.get("nombre", "").strip()
-            if not nombre:
-                continue
-            fecha = t.get("fecha") or hoy_iso()
-            ok, _ = create_task(nombre, fecha=fecha)
-            if ok:
-                n_tar += 1
-        except Exception as e:
-            print("Error registrando tarea desde OCR:", e)
+    # Tareas
+    for t in desde_imagen.get("tareas", []):
+        titulo = t.get("titulo") or "Tarea sin título"
+        fecha = t.get("fecha") or None
+        create_task(titulo, fecha=fecha)
 
-    # Registrar eventos
-    for ev in eventos:
-        try:
-            nombre = ev.get("nombre", "").strip()
-            if not nombre:
-                continue
-            fecha = ev.get("fecha") or hoy_iso()
-            ok, _ = create_event(nombre, fecha=fecha)
-            if ok:
-                n_eve += 1
-        except Exception as e:
-            print("Error registrando evento desde OCR:", e)
+    # Eventos
+    for ev in desde_imagen.get("eventos", []):
+        titulo = ev.get("titulo") or "Evento sin título"
+        fecha = ev.get("fecha") or hoy_iso()
+        lugar = ev.get("lugar") or ""
+        create_event(titulo, fecha=fecha, lugar=lugar)
 
-    # Registrar hábitos
-    for h in habitos:
-        try:
-            nombre = h.get("nombre", "").strip()
-            if not nombre:
-                continue
-            ok, _ = create_habit(nombre)
-            if ok:
-                n_hab += 1
-        except Exception as e:
-            print("Error registrando hábito desde OCR:", e)
+    # Proyectos
+    for p in desde_imagen.get("proyectos", []):
+        nombre = p.get("nombre") or "Proyecto sin nombre"
+        create_project(nombre)
 
-    resumen = (
-        f"De la imagen registré:\n"
-        f"• Finanzas: {n_fin}\n"
-        f"• Tareas: {n_tar}\n"
-        f"• Eventos: {n_eve}\n"
-        f"• Hábitos: {n_hab}"
-    )
-    send_message(chat_id, resumen, reply_to)
+    # Hábitos
+    for h in desde_imagen.get("habitos", []):
+        nombre = h.get("nombre") or "Hábito sin nombre"
+        create_habit(nombre)
 
 # =========================
 #  PARSEO DE COMANDOS
@@ -564,8 +548,7 @@ HELP_TEXT = (
     "• `eventos hoy`\n"
     "• `proyectos activos`\n"
     "• `hábitos activos`\n\n"
-    "También puedes enviar una *foto de tus apuntes* y Ares intentará convertirlos "
-    "en finanzas, tareas, eventos y hábitos."
+    "Si escribes algo más libre, Ares usará la IA para ayudarte."
 )
 
 
@@ -583,13 +566,8 @@ def manejar_comando_finanzas(texto, chat_id):
         except ValueError:
             send_message(chat_id, "No entendí el monto. Usa algo como: `gasto: 150 tacos`")
             return True
-        ok, msg = create_financial_record(
-            movimiento=descripcion, tipo="Egreso", monto=monto_num
-        )
-        if ok:
-            send_message(chat_id, f"✔ Gasto registrado: {monto_num} – {descripcion}")
-        else:
-            send_message(chat_id, "No pude guardar el gasto en Notion.\n" + msg)
+        create_financial_record(movimiento=descripcion, tipo="Egreso", monto=monto_num)
+        send_message(chat_id, f"✔ Gasto registrado: {monto_num} – {descripcion}")
         return True
 
     if texto.startswith("ingreso:"):
@@ -605,13 +583,8 @@ def manejar_comando_finanzas(texto, chat_id):
         except ValueError:
             send_message(chat_id, "No entendí el monto. Usa algo como: `ingreso: 9000 sueldo`")
             return True
-        ok, msg = create_financial_record(
-            movimiento=descripcion, tipo="Ingreso", monto=monto_num
-        )
-        if ok:
-            send_message(chat_id, f"✔ Ingreso registrado: {monto_num} – {descripcion}")
-        else:
-            send_message(chat_id, "No pude guardar el ingreso en Notion.\n" + msg)
+        create_financial_record(movimiento=descripcion, tipo="Ingreso", monto=monto_num)
+        send_message(chat_id, f"✔ Ingreso registrado: {monto_num} – {descripcion}")
         return True
 
     if "estado finanzas" in texto or "balance este mes" in texto:
@@ -635,11 +608,8 @@ def manejar_comando_tareas(texto, chat_id):
         if not descripcion:
             send_message(chat_id, "Formato: `tarea: descripción de la tarea`")
             return True
-        ok, msg = create_task(descripcion)
-        if ok:
-            send_message(chat_id, f"✔ Tarea creada: {descripcion}")
-        else:
-            send_message(chat_id, "No pude guardar la tarea en Notion.\n" + msg)
+        create_task(descripcion)
+        send_message(chat_id, f"✔ Tarea creada: {descripcion}")
         return True
 
     if "tareas hoy" in texto or "tareas atrasadas" in texto:
@@ -655,11 +625,8 @@ def manejar_comando_eventos(texto, chat_id):
         if not descripcion:
             send_message(chat_id, "Formato rápido: `evento: junta kaizen viernes 16:00`")
             return True
-        ok, msg = create_event(descripcion, fecha=hoy_iso())
-        if ok:
-            send_message(chat_id, f"✔ Evento creado (hoy): {descripcion}")
-        else:
-            send_message(chat_id, "No pude guardar el evento en Notion.\n" + msg)
+        create_event(descripcion, fecha=hoy_iso())
+        send_message(chat_id, f"✔ Evento creado (hoy): {descripcion}")
         return True
 
     if "eventos hoy" in texto or "agenda" in texto:
@@ -675,11 +642,8 @@ def manejar_comando_proyectos(texto, chat_id):
         if not nombre:
             send_message(chat_id, "Formato: `proyecto: nombre del proyecto`")
             return True
-        ok, msg = create_project(nombre)
-        if ok:
-            send_message(chat_id, f"✔ Proyecto creado: {nombre}")
-        else:
-            send_message(chat_id, "No pude guardar el proyecto en Notion.\n" + msg)
+        create_project(nombre)
+        send_message(chat_id, f"✔ Proyecto creado: {nombre}")
         return True
 
     if "proyectos activos" in texto:
@@ -695,11 +659,8 @@ def manejar_comando_habitos(texto, chat_id):
         if not nombre:
             send_message(chat_id, "Formato: `hábito: descripción del hábito`")
             return True
-        ok, msg = create_habit(nombre)
-        if ok:
-            send_message(chat_id, f"✔ Hábito creado: {nombre}")
-        else:
-            send_message(chat_id, "No pude guardar el hábito en Notion.\n" + msg)
+        create_habit(nombre)
+        send_message(chat_id, f"✔ Hábito creado: {nombre}")
         return True
 
     if "hábitos activos" in texto or "habitos activos" in texto:
@@ -729,15 +690,34 @@ def webhook():
     chat_id = message["chat"]["id"]
     message_id = message.get("message_id")
 
-    # 1) Si trae foto, la procesamos con OCR
-    if "photo" in message and message["photo"]:
-        procesar_foto_y_registrar(chat_id, message, reply_to=message_id)
+    # FOTO → OCR → NOTION
+    if "photo" in message:
+        photo_sizes = message["photo"]
+        file_id = photo_sizes[-1]["file_id"]  # mayor resolución
+        file_url = get_telegram_file_url(file_id)
+        if not file_url:
+            send_message(chat_id, "No pude descargar la imagen, intenta de nuevo por favor.")
+            return "OK"
+
+        send_message(
+            chat_id,
+            "Dame un momento, voy a leer tus apuntes y organizarlos en Notion…",
+            reply_to=message_id,
+        )
+        data_notas = procesar_imagen_notas(file_url)
+        if not data_notas:
+            send_message(chat_id, "No pude interpretar la imagen. Intenta que la foto sea más clara.")
+            return "OK"
+
+        guardar_notas_estructuradas(data_notas)
+        send_message(chat_id, "Listo, ya guardé lo que encontré en tus apuntes en Notion. ✅")
         return "OK"
 
-    # 2) Solo texto
+    # TEXTO
     text = (message.get("text") or "").strip()
+
     if not text:
-        send_message(chat_id, "Solo entiendo mensajes de texto o fotos por ahora. 🙂")
+        send_message(chat_id, "Solo entiendo mensajes de texto o fotos de apuntes por ahora. 🙂")
         return "OK"
 
     lower = text.lower().strip()
@@ -757,11 +737,12 @@ def webhook():
     if manejado:
         return "OK"
 
+    # IA por defecto
     respuesta_ia = consultar_ia(text)
     send_message(chat_id, respuesta_ia, reply_to=message_id)
+
     return "OK"
 
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
-
